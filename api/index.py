@@ -1,25 +1,49 @@
-
-import os, requests
+import os
+import requests
 from fastapi import FastAPI, Request
-from google import genai
+from openai import OpenAI
 
 app = FastAPI()
 
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
+
     ticker = data.get("ticker", "N/A")
     action = data.get("action", "ALERT")
     price = data.get("price", "N/A")
 
-    prompt = f"TradingView 신호 분석: 종목 {ticker}, 신호 {action}, 가격 {price}. GEX 데이터 및 기술적 관점 안전성 검증과 추천 Stop Loss를 3줄 요약해줘."
+    prompt = (
+        f"TradingView 신호 분석:\n"
+        f"종목: {ticker}\n"
+        f"신호: {action}\n"
+        f"가격: {price}\n\n"
+        f"Market Forge 관점에서 이 신호의 의미를 짧게 분석해줘. "
+        f"추세 지속 가능성, 주의할 점, 리스크를 한국어로 간결하게 정리해줘. "
+        f"개인 투자 조언이 아니라 교육용 분석으로 작성해줘."
+    )
 
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-    msg = f"🚨 [{action}] {ticker} (${price})\n\n🤖 **Gemini 분석:**\n{response.text}"
+    response = client.responses.create(
+        model="gpt-5.5",
+        input=prompt
+    )
+
+    analysis = response.output_text
+
+    msg = (
+        f"🚨 [{action}] {ticker} (${price})\n\n"
+        f"🤖 **Market Forge AI 분석:**\n{analysis}"
+    )
+
     requests.post(
         f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendMessage",
-        json={"chat_id": os.environ.get("TELEGRAM_CHAT_ID"), "text": msg, "parse_mode": "Markdown"}
+        json={
+            "chat_id": os.environ.get("TELEGRAM_CHAT_ID"),
+            "text": msg,
+            "parse_mode": "Markdown"
+        }
     )
+
     return {"status": "ok"}
