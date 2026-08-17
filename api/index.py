@@ -5,6 +5,12 @@ from openai import OpenAI
 
 app = FastAPI()
 
+
+@app.get("/")
+def health():
+    return {"status": "Market Forge online"}
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
@@ -34,19 +40,22 @@ async def webhook(request: Request):
 
     msg = (
         f"🚨 [{action}] {ticker} (${price})\n\n"
-        f"🤖 **Market Forge AI 분석:**\n{analysis}"
+        f"🤖 Market Forge AI 분석:\n{analysis}"
     )
 
-    requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendMessage",
-    json={
-        "chat_id": os.environ.get("TELEGRAM_CHAT_ID"),
-        "text": msg
+    telegram_response = requests.post(
+        f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendMessage",
+        json={
+            "chat_id": os.environ.get("TELEGRAM_CHAT_ID"),
+            "text": msg
+        },
+        timeout=20
+    )
+
+    print("Telegram status:", telegram_response.status_code)
+    print("Telegram response:", telegram_response.text)
+
+    return {
+        "status": "ok",
+        "telegram_status": telegram_response.status_code
     }
-)
-
-print("Telegram status:", telegram_response.status_code)
-print("Telegram response:", telegram_response.text)
-
-return {"status": "ok"}
-       
-    return {"status": "ok"}
