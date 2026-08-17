@@ -37,13 +37,16 @@ async def webhook(request: Request):
         f"🤖 **Market Forge AI 분석:**\n{analysis}"
     )
 
-    requests.post(
-        f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendMessage",
-        json={
-            "chat_id": os.environ.get("TELEGRAM_CHAT_ID"),
-            "text": msg,
-            "parse_mode": "Markdown"
-        }
-    )
+    requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendMessage",
+    json={
+        "chat_id": os.environ.get("TELEGRAM_CHAT_ID"),
+        "text": msg
+    }
+)
 
+print("Telegram status:", telegram_response.status_code)
+print("Telegram response:", telegram_response.text)
+
+return {"status": "ok"}
+       
     return {"status": "ok"}
