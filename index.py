@@ -1,5 +1,6 @@
 import os
 import requests
+
 from fastapi import FastAPI, Request
 from openai import OpenAI
 
@@ -15,43 +16,105 @@ async def root():
 async def webhook(request: Request):
     data = await request.json()
 
-    ticker = data.get("ticker", "N/A")
-    action = data.get("action", "ALERT")
-    price = data.get("price", "N/A")
+    ticker = str(data.get("ticker", "N/A")).upper()
+    action = str(data.get("action", "ALERT")).upper()
+    price = str(data.get("price", "N/A"))
 
-    prompt = (
-        f"TradingView 신호 분석:\n"
-        f"종목: {ticker}\n"
-        f"신호: {action}\n"
-        f"가격: {price}\n\n"
-        f"Market Forge 관점에서 이 신호의 의미를 짧게 분석해줘. "
-        f"추세 지속 가능성, 주의할 점, 리스크를 한국어로 간결하게 정리해줘. "
-        f"개인 투자 조언이 아니라 교육용 분석으로 작성해줘."
+    signal_map = {
+        "C": ("🟢", "CALL"),
+        "MC": ("🚀", "MOMENTUM CALL"),
+        "P": ("🔴", "PUT"),
+        "MP": ("🔻", "MOMENTUM PUT"),
+        "CMP": ("⚠️", "CRASH MOMENTUM"),
+        "SCMP": ("🚨", "SHOCK CRASH"),
+        "CTN UP": ("⬆️", "CONTINUATION UP"),
+        "CTN↑": ("⬆️", "CONTINUATION UP"),
+        "CTN DOWN": ("⬇️", "CONTINUATION DOWN"),
+        "CTN↓": ("⬇️", "CONTINUATION DOWN"),
+        "X": ("🟡", "EXIT"),
+        "SX": ("🟠", "SHOCK EXIT"),
+        "HX": ("🛑", "HARD EXIT"),
+    }
+
+    icon, signal_name = signal_map.get(
+        action,
+        ("🔔", action)
     )
 
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    # Exit alerts stay extremely short
+    if action in {"X", "SX", "HX"}:
+        exit_text = {
+            "X": "Trend weakening",
+            "SX": "Sharp reversal detected",
+            "HX": "Trend structure broken",
+        }
 
-    response = client.responses.create(
-        model="gpt-5.5",
-        input=prompt
-    )
+        msg = (
+            f"{icon} {ticker} | {action} | ${price}\n"
+            f"{exit_text[action]}\n"
+            f"Market Forge AI"
+        )
 
-    analysis = response.output_text
+    else:
+        prompt = f"""
+You are Market Forge AI.
 
-    msg = (
-        f"🚨 [{action}] {ticker} (${price})\n\n"
-        f"🤖 Market Forge AI 분석:\n"
-        f"{analysis}"
-    )
+TradingView signal:
+Ticker: {ticker}
+Signal: {action}
+Signal meaning: {signal_name}
+Price: {price}
+
+Return ONLY these exact 4 lines:
+
+Momentum: HIGH, MED, or LOW
+Risk: HIGH, MED, or LOW
+Trend: BULLISH, BEARISH, or NEUTRAL
+Note: short Korean sentence, maximum 8 Korean words
+
+Do not use markdown.
+Do not give investment advice.
+Do not add explanations.
+"""
+
+        try:
+            client = OpenAI(
+                api_key=os.environ.get("OPENAI_API_KEY")
+            )
+
+            response = client.responses.create(
+                model="gpt-5.6-luna",
+                input=prompt
+            )
+
+            analysis = response.output_text.strip()
+
+        except Exception as e:
+            print("OpenAI error:", str(e))
+
+            analysis = (
+                "Momentum: MED\n"
+                "Risk: MED\n"
+                "Trend: NEUTRAL\n"
+                "Note: 추가 확인 필요"
+            )
+
+        msg = (
+            f"{icon} {ticker} | {action} | ${price}\n"
+            f"{analysis}\n"
+            f"Market Forge AI"
+        )
+
+    telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
     telegram_response = requests.post(
-        f"https://api.telegram.org/bot"
-        f"{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendMessage",
+        f"https://api.telegram.org/bot{telegram_token}/sendMessage",
         json={
-            "chat_id": os.environ.get("TELEGRAM_CHAT_ID"),
+            "chat_id": telegram_chat_id,
             "text": msg
         },
-        timeout=10
+        timeout=20
     )
 
     print("Telegram status:", telegram_response.status_code)
@@ -59,5 +122,7 @@ async def webhook(request: Request):
 
     return {
         "status": "ok",
+        "ticker": ticker,
+        "action": action,
         "telegram_status": telegram_response.status_code
     }
