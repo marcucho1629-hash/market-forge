@@ -13,8 +13,7 @@ async def root():
 
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
+async def webhook(data: dict):
 
     ticker = str(data.get("ticker", "N/A")).upper()
     action = str(data.get("action", "ALERT")).upper()
