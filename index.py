@@ -30,7 +30,7 @@ def now_utc(): return datetime.now(timezone.utc)
 
 @lru_cache
 def storage():
-    url=os.getenv('SCANNER_DATABASE_URL')
+    url=os.getenv('SCANNER_DATABASE_POSTGRES_URL')
     if not url: raise RuntimeError('SCANNER_DATABASE_URL required for persistent scanner logs')
     return Store(url)
 
