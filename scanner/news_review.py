@@ -38,5 +38,5 @@ def review_latest(store,ticker,document_ids,now):
             with store.transaction() as tx:tx.put('machine-review:'+ticker+':'+identity,result)
             results.append(result)
         except Exception as exc:
-            results.append({'document_id':identity,'status':'review_unavailable','error_type':type(exc).__name__,'http_status':getattr(exc,'status_code',None)})
+            results.append({'document_id':identity,'status':'review_unavailable','error_type':type(exc).__name__,'http_status':getattr(exc,'status_code',None),'error_code':getattr(exc,'code',None),'error_param':getattr(exc,'param',None)})
     return {'status':'review_complete','reviews':results}
