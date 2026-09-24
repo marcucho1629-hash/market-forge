@@ -79,7 +79,10 @@ def drain(store,send,limit=5,prefix=None,now=None):
     results=[]
     for _ in range(limit):
         with store.transaction() as tx:
-            row=tx.execute("SELECT id,payload FROM mf_outbox WHERE status='pending' AND (? IS NULL OR id LIKE ?) ORDER BY id LIMIT 1",(prefix, (prefix+'%') if prefix else None)).fetchone()
+            if prefix is None:
+                row=tx.execute("SELECT id,payload FROM mf_outbox WHERE status='pending' ORDER BY id LIMIT 1").fetchone()
+            else:
+                row=tx.execute("SELECT id,payload FROM mf_outbox WHERE status='pending' AND id LIKE ? ORDER BY id LIMIT 1",(prefix+'%',)).fetchone()
             if not row: break
             id,payload=row
             decoded=json.loads(payload)
