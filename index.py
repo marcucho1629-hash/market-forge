@@ -18,6 +18,18 @@ from scanner.comparison import compare
 log=logging.getLogger('market_forge')
 app=FastAPI(title='Market Forge AI')
 
+@app.post('/webhook/chart-news')
+def chart_news_webhook(data:dict):
+    secret=os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
+    if not secret or not isinstance(data.get('secret'),str) or not hmac.compare_digest(data['secret'],secret):
+        raise HTTPException(401,'Unauthorized')
+    from scanner.chart_news import shadow_batch,webhook_payload
+    try:
+        now=now_utc()
+        return shadow_batch(storage(),webhook_payload(data,now),now)
+    except (ValueError,KeyError,TypeError,OverflowError) as exc:
+        raise HTTPException(422,str(exc)) from None
+
 @app.post('/scanner/chart-news/shadow')
 def chart_news_shadow(data:dict, token=Depends(APIKeyHeader(name='Authorization',auto_error=False))):
     authorized(token)
@@ -314,4 +326,3 @@ def tradingview_deliver():
     if os.getenv('TV_INFORMATION_MODE','shadow')!='live':
         return {'mode':'shadow','delivery':[]}
     return {'delivery':drain(storage(),send_telegram,prefix='tv-info:')}
-

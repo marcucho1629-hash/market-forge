@@ -13,6 +13,29 @@ def number(row, key, low=None, high=None):
     return finite(row[key], low, high)
 
 
+def webhook_payload(data, now):
+    """Normalize Pine input, exclude credentials and reject mismatched benchmarks."""
+    if data.get('source')!='MF_V13_29_CHART_NEWS' or type(data.get('schema_version')) is not int or data['schema_version']!=1:
+        raise ValueError('unsupported chart-news schema')
+    if data.get('sampling')!='closed_5m':
+        raise ValueError('this producer supports closed 5m only')
+    expected={'C':'LONG','MC':'LONG','CTN_UP':'LONG','P':'SHORT','MP':'SHORT','CMP':'SHORT','SCMP':'SHORT','CTN_DOWN':'SHORT'}
+    if data.get('action') not in expected or expected[data['action']]!=data.get('direction'):
+        raise ValueError('entry action direction mismatch')
+    ended=stamp(data['bar_end'])
+    if not 0<=(now-ended).total_seconds()<=60:
+        raise ValueError('stale or future completed bar')
+    times=[number(data,k,0) for k in ('bar_time','previous_bar_time','benchmark_bar_time','benchmark_previous_bar_time')]
+    start,previous,bstart,bprevious=times
+    if start!=bstart or previous!=bprevious or previous>=start or abs(ended.timestamp()*1000-start-300000)>.01:
+        raise ValueError('benchmark interval mismatch')
+    keys=('ticker','direction','observed_at','sampling','price','ema9','ema21','vwap','ema9_slope_atr',
+          'relative_volume','directional_momentum_atr','rsi','extension_atr','choppy','wide_whipsaw','breakout_valid','pullback_valid')
+    row={k:data[k] for k in keys}
+    row['relative_return_pct']=number(data,'symbol_return_pct')-number(data,'benchmark_return_pct')
+    return {'observations':[row]}
+
+
 def assess(tx, row, now):
     ticker, direction = row['ticker'], row['direction']
     if ticker not in UNIVERSE or direction not in ('LONG', 'SHORT'):

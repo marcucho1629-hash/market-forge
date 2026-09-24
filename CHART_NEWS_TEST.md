@@ -17,3 +17,11 @@ Authenticated `/scanner/chart-news/documents` stores fetched Bigdata bodies with
 Current verification: synthetic unit/integration tests only, including all 70 symbols, LONG/SHORT symmetry, exact threshold, missing evidence, point-in-time evidence, duplicate events, quotas and no Telegram writes.
 
 Remaining before a live test: wire actual chart features and benchmark-relative returns, source and review real Bigdata records, provide session calendar, deploy and verify these routes. Existing Pine payloads do not yet supply all required features. Live Telegram remains disabled for this experiment. The legacy unfiltered 70-symbol alerts have not been reactivated.
+
+## September 24 connection work
+
+`pine/Market_Forge_V13_29_Chart_News_SHADOW.pine` now emits the required chart features to `/webhook/chart-news` using a body secret. Outgoing alerts default off. Daily ET session gating replaces the expired one-day gate. Relative strength compares matching completed 5m symbol/SPY returns, including matching previous-bar timestamps; unmatched intervals are skipped. Structure uses five-bar range breakout with 0.05 ATR buffer, or trend-aligned EMA9 touch/reclaim above/below VWAP. This is still the confirmed five-minute engine, not intrabar entries.
+
+The receiver validates producer/schema, completed-bar age, benchmark interval, direction and authentication, removes secrets from stored payloads, and evaluates shadow only. No Telegram is queued. Per-alert arrival ordering is not global ranking of 70 symbols.
+
+Vercel project and shared environment-variable search both found no BIGDATA variable. A server API key is required for automatic API calls (official reference: https://docs.bigdata.com/api-rest/authentication). API authentication does not itself implement the news polling/review worker. That worker, session provisioning, live deployment and Telegram receipt remain outstanding.
