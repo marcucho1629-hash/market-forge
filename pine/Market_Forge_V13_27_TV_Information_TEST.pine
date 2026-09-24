@@ -1,0 +1,2296 @@
+//@version=6
+indicator("Market Forge V13.27 TV Information TEST", overlay=false, dynamic_requests=true)
+plot(0, display=display.none, editable=false)
+// One-day test candidate. TradingView compilation/live operation must be verified.
+// Engine and entry/exit thresholds unchanged; 7 banks x 10 symbols, separate alerts.
+// V13.16 CONFIRMED strategy copied into each requested 5m context.
+// Only p[1] emits confirmed entries. Intrabar entry engine is NOT ported.
+// LIVE X/SX formulas are aligned; actual observation times still differ.
+enableAlerts = input.bool(true, "Enable outgoing alerts (selected test date only)", group="Test controls")
+bank = input.int(1, "Ticker bank (create alerts for banks 1 through 7)", minval=1, maxval=7, group="Universe")
+testYear = input.int(2026, "Test year", group="Test controls")
+testMonth = input.int(9, "Test month", minval=1, maxval=12, group="Test controls")
+testDay = input.int(23, "Test day", minval=1, maxval=31, group="Test controls")
+webhookSecret = input.string("", "Webhook secret (letters/digits only)", group="Test controls")
+testOpen = timestamp("America/New_York", testYear, testMonth, testDay, 9, 30)
+testClose = timestamp("America/New_York", testYear, testMonth, testDay, 16, 0)
+testWindow = timenow >= testOpen and timenow < testClose + 60000
+// Fixed comparison settings: no score/rank changes during the one-day experiment.
+useScore = false
+minScore = 90
+useLimits = false
+topN = 10
+maxActive = 10
+liveExits = false // Confirmed-bar comparison; prevents intrabar alert bursts.
+showTable = input.bool(true, "Show table")
+showDiagnostics = input.bool(true, "Show scanner diagnostics", group="Diagnostics")
+diagnosticRows = input.int(10, "Diagnostic rows", minval=1, maxval=10, group="Diagnostics")
+// Changing inputs reloads the script and clears this in-memory log.
+showEventLog = input.bool(true, "Show event log instead of current status (reload clears log)", group="Event log")
+
+if barstate.isfirst and (not timeframe.isminutes or timeframe.multiplier != 1 or not chart.is_standard)
+    runtime.error("Use a standard SPY 1-minute chart; calculations use regular-session 5m bars.")
+
+type Snapshot
+    float c
+    float o
+    float h
+    float l
+    float e9
+    float e21
+    float vw
+    float rsi
+    float atr
+    float previousE9
+    float previousHigh
+    float previousLow
+    int stamp
+    int ended
+    int day
+    bool regular
+    string entryAction
+    int entrySide
+    string exitAction
+    int exitSide
+    string displayedExit
+    string continuation
+    int stateSide
+    float longScore
+    float shortScore
+    string condition
+    bool sourceWhipsaw
+    float travelEfficiency8
+    float rangeAtr8
+    float relativeVolume
+
+type Feed
+    Snapshot live
+    Snapshot closed
+
+f_points(float value, float scale, float weight) =>
+    math.max(0.0, math.min(1.0, value / scale)) * weight
+
+f_engine() =>
+    // BEGIN NORMALIZED V13.16 CONFIRMED ENGINE
+    ema9 = ta.ema(close, 9)
+    ema21 = ta.ema(close, 21)
+    vwap = ta.vwap(hlc3)
+    rsi = ta.rsi(close, 14)
+
+    atr14 = ta.atr(14)
+    volAvg20 = ta.sma(volume, 20)
+
+    bodySize = math.abs(close - open)
+    bodyAvg20 = ta.sma(bodySize, 20)
+
+
+    //====================================================
+    // TREND ENGINE
+    //====================================================
+    spread = math.abs(ema9 - ema21)
+
+    normalMinSpread = close * 0.00035
+    momentumMinSpread = close * 0.00020
+
+    emaBullSlope = ema9 > ema9[1] and ema21 >= ema21[1]
+    emaBearSlope = ema9 < ema9[1] and ema21 <= ema21[1]
+
+    bullTrend = (
+        ema9 > ema21 and
+        close > ema21 and
+        close > vwap and
+        spread > normalMinSpread and
+        emaBullSlope
+    )
+
+    bearTrend = (
+        ema9 < ema21 and
+        close < ema21 and
+        close < vwap and
+        spread > normalMinSpread and
+        emaBearSlope
+    )
+
+    //====================================================
+    // STRONG DIRECTION CONTEXT
+    //====================================================
+    strongBearContext = (
+        ema9 < ema21 and
+        ema9 < ema9[2] and
+        ema21 <= ema21[2] and
+        close < ema21 and
+        close < vwap and
+        rsi < 48
+    )
+
+    strongBullContext = (
+        ema9 > ema21 and
+        ema9 > ema9[2] and
+        ema21 >= ema21[2] and
+        close > ema21 and
+        close > vwap and
+        rsi > 52
+    )
+
+    //====================================================
+    // CHOP FILTER
+    //====================================================
+    nearVWAP = math.abs(close - vwap) < atr14 * 0.22
+    emaCompressed = spread < close * 0.00025
+    flatEMA = math.abs(ema9 - ema9[3]) < atr14 * 0.18
+
+    baseChopZone = emaCompressed and nearVWAP and flatEMA
+
+    vwapCrossNow = ta.cross(close, vwap)
+    emaCrossNow = ta.cross(ema9, ema21)
+    rsi50CrossNow = ta.cross(rsi, 50)
+
+    vwapCrossCount5 = (
+        (vwapCrossNow ? 1 : 0) +
+        (vwapCrossNow[1] ? 1 : 0) +
+        (vwapCrossNow[2] ? 1 : 0) +
+        (vwapCrossNow[3] ? 1 : 0) +
+        (vwapCrossNow[4] ? 1 : 0)
+    )
+
+    emaCrossCount6 = (
+        (emaCrossNow ? 1 : 0) +
+        (emaCrossNow[1] ? 1 : 0) +
+        (emaCrossNow[2] ? 1 : 0) +
+        (emaCrossNow[3] ? 1 : 0) +
+        (emaCrossNow[4] ? 1 : 0) +
+        (emaCrossNow[5] ? 1 : 0)
+    )
+
+    rsiCrossCount6 = (
+        (rsi50CrossNow ? 1 : 0) +
+        (rsi50CrossNow[1] ? 1 : 0) +
+        (rsi50CrossNow[2] ? 1 : 0) +
+        (rsi50CrossNow[3] ? 1 : 0) +
+        (rsi50CrossNow[4] ? 1 : 0) +
+        (rsi50CrossNow[5] ? 1 : 0)
+    )
+
+    range6 = ta.highest(high, 6) - ta.lowest(low, 6)
+    netMove6 = math.abs(close - close[5])
+
+    lowEfficiency6 = (
+        range6 > 0 and
+        netMove6 / range6 < 0.34
+    )
+
+    whipsawZone = (
+        lowEfficiency6 and
+        spread < atr14 * 0.45 and
+        math.abs(close - vwap) < atr14 * 0.55 and
+        (vwapCrossCount5 >= 2 or emaCrossCount6 >= 1)
+    )
+
+    range8 = ta.highest(high, 8) - ta.lowest(low, 8)
+
+    rangeCompression8 = range8 < atr14 * 2.20
+    weakDirectionalTravel8 = math.abs(close - close[7]) < atr14 * 0.80
+
+    softChopZone = (
+        rangeCompression8 and
+        weakDirectionalTravel8 and
+        spread < atr14 * 0.52 and
+        math.abs(close - vwap) < atr14 * 0.70
+    )
+
+    pathMove8 = (
+        math.abs(close - close[1]) +
+        math.abs(close[1] - close[2]) +
+        math.abs(close[2] - close[3]) +
+        math.abs(close[3] - close[4]) +
+        math.abs(close[4] - close[5]) +
+        math.abs(close[5] - close[6]) +
+        math.abs(close[6] - close[7])
+    )
+
+    directionalTravel8 = math.abs(close - close[7])
+    directionEfficiency8 = pathMove8 > 0 ? directionalTravel8 / pathMove8 : 0.0
+
+    rotationChopZone = (
+        directionEfficiency8 < 0.30 and
+        range8 < atr14 * 3.10 and
+        spread < atr14 * 0.62 and
+        math.abs(close - vwap) < atr14 * 0.95
+    )
+
+    //====================================================
+    // CHOPPY LOCK
+    //====================================================
+    rsiNeutralZone = rsi >= 42 and rsi <= 58
+
+    choppyLock = (
+        rsiNeutralZone and
+        (
+            (vwapCrossCount5 >= 2 and lowEfficiency6) or
+            (rsiCrossCount6 >= 2 and spread < atr14 * 0.55) or
+            (emaCrossCount6 >= 1 and math.abs(close - vwap) < atr14 * 0.60)
+        )
+    )
+
+    chopZone = (
+        baseChopZone or
+        whipsawZone or
+        softChopZone or
+        rotationChopZone or
+        choppyLock
+    )
+
+    //====================================================
+    // VOLUME / MOMENTUM
+    //====================================================
+    volumeSurge = not na(volAvg20) and volume > volAvg20 * 1.55
+    strongVolumeSurge = not na(volAvg20) and volume > volAvg20 * 1.90
+    moderateVolume = not na(volAvg20) and volume > volAvg20 * 1.15
+    continuationVolume = not na(volAvg20) and volume > volAvg20 * 1.25
+
+    largeBullCandle = close > open and not na(bodyAvg20) and bodySize > bodyAvg20 * 1.20
+    largeBearCandle = close < open and not na(bodyAvg20) and bodySize > bodyAvg20 * 1.20
+
+    mediumBullCandle = close > open and not na(bodyAvg20) and bodySize > bodyAvg20
+    mediumBearCandle = close < open and not na(bodyAvg20) and bodySize > bodyAvg20 * 0.85
+
+    veryLargeBull = close > open and bodySize > atr14 * 0.65
+    veryLargeBear = close < open and bodySize > atr14 * 0.65
+
+    bullAcceleration = (
+        close > high[1] and
+        close > vwap and
+        ema9 > ema21 and
+        ema9 > ema9[1]
+    )
+
+    bearAcceleration = (
+        close < low[1] and
+        close < vwap and
+        ema9 < ema21 and
+        ema9 < ema9[1]
+    )
+
+    //====================================================
+    // STATE
+    //====================================================
+    var int state = 0
+
+    var int prepBar = na
+    var int entryBar = na
+    var int exitBar = na
+    var int peakBar = na
+    var int troughBar = na
+
+    var float entryPrice = na
+    var float peakPrice = na
+    var float troughPrice = na
+
+    var bool momentumTrade = false
+
+    var int lastExitDirection = 0
+    var int lastExitDirectionBar = na
+
+    var int lastCtnUpBar = na
+    var int lastCtnDownBar = na
+
+    var bool bearShockRecoveryLock = false
+    var bool bullShockRecoveryLock = false
+
+    var int bearShockBar = na
+    var int bullShockBar = na
+
+    var int lastCrashDisplayBar = na
+    var int lastExitDisplayBar = na
+
+    var int lastMCBar = na
+    var int lastMPBar = na
+
+    //====================================================
+    // DAILY RESET
+    //====================================================
+    newDay = ta.change(time("D")) != 0
+    var int barsFromDayStart = 0
+
+    if newDay
+        state := 0
+
+        prepBar := na
+        entryBar := na
+        exitBar := na
+        peakBar := na
+        troughBar := na
+
+        entryPrice := na
+        peakPrice := na
+        troughPrice := na
+
+        momentumTrade := false
+
+        lastExitDirection := 0
+        lastExitDirectionBar := na
+
+        lastCtnUpBar := na
+        lastCtnDownBar := na
+
+        bearShockRecoveryLock := false
+        bullShockRecoveryLock := false
+
+        bearShockBar := na
+        bullShockBar := na
+
+        lastCrashDisplayBar := na
+        lastExitDisplayBar := na
+
+        lastMCBar := na
+        lastMPBar := na
+
+        barsFromDayStart := 0
+    else
+        barsFromDayStart += 1
+
+    //====================================================
+    // LOCK / COOLDOWN
+    //====================================================
+    sameLegLockBars = 8
+    cooldownBars = 4
+    prepExpireBars = 5
+
+    normalMinHold = 2
+    momentumMinHold = 3
+
+    sameBullLegLocked = (
+        lastExitDirection == 1 and
+        not na(lastExitDirectionBar) and
+        bar_index - lastExitDirectionBar <= sameLegLockBars and
+        ema9 > ema21 and
+        close > ema21
+    )
+
+    sameBearLegLocked = (
+        lastExitDirection == -1 and
+        not na(lastExitDirectionBar) and
+        bar_index - lastExitDirectionBar <= sameLegLockBars and
+        ema9 < ema21 and
+        close < ema21
+    )
+
+    cooldownOK = na(exitBar) or bar_index - exitBar > cooldownBars
+
+    //====================================================
+    // REBREAK OVERRIDE
+    //====================================================
+    recentHigh3 = ta.highest(high[1], 3)
+    recentLow3 = ta.lowest(low[1], 3)
+
+    recentBullExit = (
+        lastExitDirection == 1 and
+        not na(lastExitDirectionBar) and
+        bar_index - lastExitDirectionBar >= 1 and
+        bar_index - lastExitDirectionBar <= sameLegLockBars
+    )
+
+    recentBearExit = (
+        lastExitDirection == -1 and
+        not na(lastExitDirectionBar) and
+        bar_index - lastExitDirectionBar >= 1 and
+        bar_index - lastExitDirectionBar <= sameLegLockBars
+    )
+
+    bullRebreakOverride = (
+        recentBullExit and
+        not chopZone and
+        close > open and
+        close > recentHigh3 and
+        close > ema9 and
+        close > vwap and
+        ema9 >= ema9[1] and
+        bodySize > atr14 * 0.40 and
+        rsi > rsi[1] and
+        rsi >= 53
+    )
+
+    bearRebreakOverride = (
+        recentBearExit and
+        not chopZone and
+        close < open and
+        close < recentLow3 and
+        close < ema9 and
+        close < vwap and
+        ema9 <= ema9[1] and
+        bodySize > atr14 * 0.40 and
+        rsi < rsi[1] and
+        rsi <= 47
+    )
+
+    bullEntryCooldownOK = cooldownOK or bullRebreakOverride
+    bearEntryCooldownOK = cooldownOK or bearRebreakOverride
+
+    bullLegOK = not sameBullLegLocked or bullRebreakOverride
+    bearLegOK = not sameBearLegLocked or bearRebreakOverride
+
+    //====================================================
+    // ENTRY STATE
+    //====================================================
+    callEntryStateOK = state == 0 or state == 1
+    putEntryStateOK = state == 0 or state == -1
+
+    //====================================================
+    // PREP
+    //====================================================
+    callPrep = (
+        true and
+        state == 0 and
+        cooldownOK and
+        not chopZone and
+        not strongBearContext and
+        ema9 > ema21 and
+        close > ema21 and
+        close > vwap and
+        rsi >= 50 and
+        rsi <= 61
+    )
+
+    putPrep = (
+        true and
+        state == 0 and
+        cooldownOK and
+        not chopZone and
+        not strongBullContext and
+        ema9 < ema21 and
+        close < ema21 and
+        close < vwap and
+        rsi <= 50 and
+        rsi >= 39
+    )
+
+    //====================================================
+    // NORMAL ENTRY
+    //====================================================
+    callNormalEntry = (
+        true and
+        state == 1 and
+        not chopZone and
+        not strongBearContext and
+        bullLegOK and
+        bullTrend and
+        rsi >= 54 and
+        rsi <= 72 and
+        close > high[1]
+    )
+
+    putNormalEntry = (
+        true and
+        state == -1 and
+        not chopZone and
+        not strongBullContext and
+        bearLegOK and
+        bearTrend and
+        rsi <= 46 and
+        rsi >= 28 and
+        close < low[1]
+    )
+
+    //====================================================
+    // MOMENTUM QUALITY
+    //====================================================
+    momentumBullQuality = (
+        ema9 > ema21 and
+        spread > momentumMinSpread and
+        close > vwap and
+        close > ema9
+    )
+
+    momentumBearQuality = (
+        ema9 < ema21 and
+        spread > momentumMinSpread and
+        close < vwap and
+        close < ema9
+    )
+
+    //====================================================
+    // FAST ENTRY
+    //====================================================
+    callFastScore = (
+        (close > high[1] ? 1 : 0) +
+        (emaBullSlope ? 1 : 0) +
+        (moderateVolume ? 1 : 0) +
+        (mediumBullCandle ? 1 : 0) +
+        (close - vwap > atr14 * 0.12 ? 1 : 0)
+    )
+
+    putFastScore = (
+        (close < low[1] ? 1 : 0) +
+        (emaBearSlope ? 1 : 0) +
+        (moderateVolume ? 1 : 0) +
+        (mediumBearCandle ? 1 : 0) +
+        (vwap - close > atr14 * 0.12 ? 1 : 0)
+    )
+
+    callFastEntry = (
+        true and
+        callEntryStateOK and
+        bullEntryCooldownOK and
+        not chopZone and
+        not strongBearContext and
+        bullLegOK and
+        ema9 > ema21 and
+        close > ema9 and
+        close > vwap and
+        rsi >= 52 and
+        rsi <= 76 and
+        callFastScore >= 3 and
+        (close > high[1] or veryLargeBull)
+    )
+
+    putFastEntry = (
+        true and
+        putEntryStateOK and
+        bearEntryCooldownOK and
+        not chopZone and
+        not strongBullContext and
+        bearLegOK and
+        ema9 < ema21 and
+        close < ema9 and
+        close < vwap and
+        rsi <= 48 and
+        rsi >= 24 and
+        putFastScore >= 3 and
+        (close < low[1] or veryLargeBear)
+    )
+
+    //====================================================
+    // SHOCK MOMENTUM
+    //====================================================
+    shockVolume = not na(volAvg20) and volume > volAvg20 * 1.35
+
+    shockBullBody = close > open and bodySize > atr14 * 0.90
+    shockBearBody = close < open and bodySize > atr14 * 0.90
+
+    shockBullStructure = close > high[1] and close > vwap and close > ema9
+    shockBearStructure = close < low[1] and close < vwap and close < ema9
+
+    shockCallMomentum = (
+        true and
+        callEntryStateOK and
+        bullEntryCooldownOK and
+        not chopZone and
+        bullLegOK and
+        shockBullBody and
+        shockBullStructure and
+        shockVolume and
+        rsi >= 54 and
+        rsi <= 84
+    )
+
+    shockPutMomentum = (
+        true and
+        putEntryStateOK and
+        bearEntryCooldownOK and
+        not chopZone and
+        bearLegOK and
+        shockBearBody and
+        shockBearStructure and
+        shockVolume and
+        rsi <= 46 and
+        rsi >= 12
+    )
+
+    //====================================================
+    // CLASSIC MOMENTUM
+    //====================================================
+    classicCallMomentum = (
+        true and
+        callEntryStateOK and
+        bullEntryCooldownOK and
+        not chopZone and
+        bullLegOK and
+        momentumBullQuality and
+        bullAcceleration and
+        rsi >= 55 and
+        rsi <= 82 and
+        (
+            (volumeSurge and largeBullCandle) or
+            (strongVolumeSurge and veryLargeBull)
+        )
+    )
+
+    classicPutMomentum = (
+        true and
+        putEntryStateOK and
+        bearEntryCooldownOK and
+        not chopZone and
+        bearLegOK and
+        momentumBearQuality and
+        bearAcceleration and
+        rsi <= 45 and
+        rsi >= 18 and
+        (
+            (volumeSurge and largeBearCandle) or
+            (strongVolumeSurge and veryLargeBear)
+        )
+    )
+
+    //====================================================
+    // CONTINUATION MOMENTUM
+    //====================================================
+    callContinuationScore = (
+        (close > high[1] ? 1 : 0) +
+        (emaBullSlope ? 1 : 0) +
+        (continuationVolume ? 1 : 0) +
+        (largeBullCandle ? 1 : 0) +
+        (rsi > rsi[1] ? 1 : 0)
+    )
+
+    putContinuationScore = (
+        (close < low[1] ? 1 : 0) +
+        (emaBearSlope ? 1 : 0) +
+        (continuationVolume ? 1 : 0) +
+        (largeBearCandle ? 1 : 0) +
+        (rsi < rsi[1] ? 1 : 0)
+    )
+
+    callContinuationMomentum = (
+        true and
+        callEntryStateOK and
+        bullEntryCooldownOK and
+        not chopZone and
+        bullLegOK and
+        momentumBullQuality and
+        rsi >= 54 and
+        rsi <= 80 and
+        callContinuationScore >= 4
+    )
+
+    putContinuationMomentum = (
+        true and
+        putEntryStateOK and
+        bearEntryCooldownOK and
+        not chopZone and
+        bearLegOK and
+        momentumBearQuality and
+        rsi <= 46 and
+        rsi >= 20 and
+        putContinuationScore >= 4
+    )
+
+    //====================================================
+    // CLEAN TREND CONTINUATION
+    //====================================================
+    cleanBullContinuation = (
+        true and
+        callEntryStateOK and
+        bullEntryCooldownOK and
+        bullLegOK and
+        not chopZone and
+        ema9 > ema21 and
+        ema9 > ema9[1] and
+        ema9[1] >= ema9[2] and
+        ema21 >= ema21[1] and
+        close > ema9 and
+        close > ema21 and
+        close > vwap and
+        close > recentHigh3 and
+        close - ema21 > atr14 * 0.15 and
+        spread > momentumMinSpread and
+        rsi >= 54 and
+        rsi <= 80 and
+        rsi > rsi[1] and
+        (bodySize > atr14 * 0.28 or moderateVolume)
+    )
+
+    cleanBearContinuation = (
+        true and
+        putEntryStateOK and
+        bearEntryCooldownOK and
+        bearLegOK and
+        not chopZone and
+        ema9 < ema21 and
+        ema9 < ema9[1] and
+        ema9[1] <= ema9[2] and
+        ema21 <= ema21[1] and
+        close < ema9 and
+        close < ema21 and
+        close < vwap and
+        close < recentLow3 and
+        ema21 - close > atr14 * 0.15 and
+        spread > momentumMinSpread and
+        rsi <= 48 and
+        rsi >= 18 and
+        rsi < rsi[1] and
+        (bodySize > atr14 * 0.28 or moderateVolume)
+    )
+
+    //====================================================
+    // LATE ENTRY FILTER
+    //====================================================
+    bullExtended1 = close[1] > ema21[1] + atr14[1] * 0.90
+    bullExtended2 = close[2] > ema21[2] + atr14[2] * 0.75
+
+    bearExtended1 = close[1] < ema21[1] - atr14[1] * 0.90
+    bearExtended2 = close[2] < ema21[2] - atr14[2] * 0.75
+
+    lateBullEntry = (
+        bullExtended1 and
+        bullExtended2 and
+        close > ema21 + atr14 * 1.15 and
+        rsi >= 68
+    )
+
+    lateBearEntry = (
+        bearExtended1 and
+        bearExtended2 and
+        close < ema21 - atr14 * 1.15 and
+        rsi <= 32
+    )
+
+    //====================================================
+    // CRASH ENGINE
+    //====================================================
+    crashRange = high - low
+
+    crashCloseNearLow = (
+        crashRange > 0 and
+        (close - low) / crashRange <= 0.34
+    )
+
+    strongBullProtection = (
+        ema9 > ema21 and
+        ema9 > ema9[1] and
+        ema21 >= ema21[1] and
+        close > ema21 and
+        close > vwap and
+        rsi >= 58
+    )
+
+    crashBodyA = close < open and bodySize > atr14 * 0.68
+
+    crashStructureA = (
+        close < low[1] and
+        close < ema9 and
+        close < vwap
+    )
+
+    crashVolumeA = not na(volAvg20) and volume > volAvg20 * 1.08
+
+    crashPathA = (
+        crashBodyA and
+        crashStructureA and
+        crashCloseNearLow and
+        crashVolumeA and
+        rsi < 53 and
+        not strongBullProtection
+    )
+
+    crashBodyB = close < open and bodySize > atr14 * 0.42
+
+    crashStructureB = (
+        close < low[1] and
+        close < low[2] and
+        close < ema9 and
+        close < vwap and
+        ema9 <= ema9[1]
+    )
+
+    crashVolumeB = not na(volAvg20) and volume > volAvg20 * 0.90
+
+    crashPathB = (
+        crashBodyB and
+        crashStructureB and
+        crashVolumeB and
+        rsi < 49 and
+        not strongBullProtection
+    )
+
+    //====================================================
+    // EXTREME SHOCK
+    //====================================================
+    extremeBody = close < open and bodySize > atr14 * 1.05
+    extremeRange = crashRange > atr14 * 1.25
+
+    extremeBreak = (
+        close < low[1] and
+        low < low[1] - atr14 * 0.20
+    )
+
+    extremeLocation = close < ema9 and close < vwap
+    extremeMomentum = rsi < rsi[1] and rsi < 60
+
+    extremeCloseQuality = (
+        crashRange > 0 and
+        (close - low) / crashRange <= 0.40
+    )
+
+    extremeShockPath = (
+        extremeBody and
+        extremeRange and
+        extremeBreak and
+        extremeLocation and
+        extremeMomentum and
+        extremeCloseQuality
+    )
+
+    //====================================================
+    // WATERFALL
+    //====================================================
+    waterfallGap = open < close[1] - atr14 * 0.35
+
+    waterfallContinuation = (
+        close < open and
+        close < low[1] and
+        close < ema9 and
+        close < vwap and
+        bodySize > atr14 * 0.48 and
+        rsi < 52
+    )
+
+    waterfallPath = (
+        waterfallGap and
+        waterfallContinuation and
+        not strongBullProtection
+    )
+
+    //====================================================
+    // STRUCTURAL BREAK
+    //====================================================
+    support3 = ta.lowest(low[1], 3)
+    support5 = ta.lowest(low[1], 5)
+
+    structuralBreak = (
+        close < support3 and
+        low < support5 and
+        close < ema9 and
+        close < ema21 and
+        close < vwap
+    )
+
+    fastDownDisplacement = (
+        ema9 < ema9[1] and
+        close < ema9 - atr14 * 0.30
+    )
+
+    structuralBody = close < open and bodySize > atr14 * 0.55
+    structuralMomentum = rsi < rsi[1] and rsi < 55
+
+    structuralCloseQuality = (
+        crashRange > 0 and
+        (close - low) / crashRange <= 0.42
+    )
+
+    structuralShockPath = (
+        structuralBreak and
+        fastDownDisplacement and
+        structuralBody and
+        structuralMomentum and
+        structuralCloseQuality and
+        not strongBullProtection
+    )
+
+    gapStructuralShock = (
+        open < support3 - atr14 * 0.20 and
+        close < open and
+        close < ema9 and
+        close < vwap and
+        bodySize > atr14 * 0.38 and
+        rsi < 52 and
+        not strongBullProtection
+    )
+
+    //====================================================
+    // OPENING WATERFALL
+    //====================================================
+    openingWindow = barsFromDayStart <= 3
+    openingGapDown = open < close[1] - atr14 * 0.25
+
+    openingWaterfallBody = close < open and bodySize > atr14 * 0.65
+
+    openingWaterfallBreak = (
+        low < ta.lowest(low[1], 5) and
+        close < low[1]
+    )
+
+    openingWaterfallLocation = close < ema9 and close < vwap
+    openingWaterfallMomentum = rsi < rsi[1] and rsi < 58
+
+    openingWaterfallQuality = (
+        crashRange > 0 and
+        (close - low) / crashRange <= 0.45
+    )
+
+    openingWaterfallPath = (
+        openingWindow and
+        openingWaterfallBody and
+        openingWaterfallBreak and
+        openingWaterfallLocation and
+        openingWaterfallMomentum and
+        openingWaterfallQuality and
+        (openingGapDown or crashRange > atr14 * 1.10)
+    )
+
+    //====================================================
+    // POST CALL BREAKDOWN
+    //====================================================
+    recentCallExit = (
+        lastExitDirection == 1 and
+        not na(lastExitDirectionBar) and
+        bar_index - lastExitDirectionBar >= 1 and
+        bar_index - lastExitDirectionBar <= 4
+    )
+
+    postCallBearShockPath = (
+        recentCallExit and
+        not chopZone and
+        close < open and
+        close < recentLow3 and
+        close < ema9 and
+        close < vwap and
+        bodySize > atr14 * 0.48 and
+        rsi < rsi[1] and
+        rsi < 52 and
+        crashRange > 0 and
+        (close - low) / crashRange <= 0.45 and
+        (close < ema21 or bodySize > atr14 * 0.68)
+    )
+
+    //====================================================
+    // ROTATION CRASH EXCEPTION
+    //====================================================
+    rotationCrashCloseQuality = (
+        crashRange > 0 and
+        (close - low) / crashRange <= 0.24
+    )
+
+    rotationCrashVolume = not na(volAvg20) and volume > volAvg20 * 1.35
+
+    rotationCrashException = (
+        close < open and
+        bodySize > atr14 * 1.15 and
+        crashRange > atr14 * 1.20 and
+        close < low[1] and
+        close < support3 and
+        close < ema9 and
+        close < ema21 and
+        close < vwap and
+        ema9 <= ema9[1] and
+        ema21 <= ema21[1] and
+        rotationCrashCloseQuality and
+        rsi < rsi[1] and
+        rsi < 43 and
+        (rotationCrashVolume or bodySize > atr14 * 1.35)
+    )
+
+    //====================================================
+    // FINAL SHOCK CRASH
+    //====================================================
+    nonOpeningShockPath = (
+        extremeShockPath or
+        waterfallPath or
+        structuralShockPath or
+        gapStructuralShock
+    )
+
+    baseShockCrashPath = (
+        openingWaterfallPath or
+        postCallBearShockPath or
+        (
+            nonOpeningShockPath and
+            (not whipsawZone or bodySize > atr14 * 0.85)
+        )
+    )
+
+    shockCrashPath = rotationChopZone ? rotationCrashException : baseShockCrashPath
+
+    regularCrashAllowed = (
+        not rotationChopZone or
+        rotationCrashException
+    )
+
+    earlyCrashMP = (
+        true and
+        putEntryStateOK and
+        (
+            shockCrashPath or
+            (
+                bearEntryCooldownOK and
+                regularCrashAllowed and
+                not chopZone and
+                bearLegOK and
+                (crashPathA or crashPathB)
+            )
+        )
+    )
+
+    //====================================================
+    // EARLY SURGE MC
+    //====================================================
+    earlyDisplacementVolume = not na(volAvg20) and volume > volAvg20 * 1.20
+
+    earlySurgeMC = (
+        true and
+        callEntryStateOK and
+        bullEntryCooldownOK and
+        not chopZone and
+        bullLegOK and
+        close > open and
+        bodySize > atr14 * 0.80 and
+        close > high[1] and
+        close > ema9 and
+        close > vwap and
+        earlyDisplacementVolume and
+        rsi > 52
+    )
+
+    //====================================================
+    // PRESSURE MOMENTUM
+    //====================================================
+    pressureCallMomentum = (
+        true and
+        callEntryStateOK and
+        bullEntryCooldownOK and
+        not chopZone and
+        bullLegOK and
+        close > open and
+        close > high[1] and
+        close > ema9 and
+        close > vwap and
+        ema9 >= ema9[1] and
+        bodySize > atr14 * 0.42 and
+        rsi > rsi[1] and
+        rsi >= 53 and
+        rsi <= 78 and
+        (moderateVolume or close > ema21 + atr14 * 0.18)
+    )
+
+    pressurePutMomentum = (
+        true and
+        putEntryStateOK and
+        bearEntryCooldownOK and
+        not chopZone and
+        bearLegOK and
+        close < open and
+        close < low[1] and
+        close < ema9 and
+        close < vwap and
+        ema9 <= ema9[1] and
+        bodySize > atr14 * 0.42 and
+        rsi < rsi[1] and
+        rsi <= 47 and
+        rsi >= 20 and
+        (moderateVolume or close < ema21 - atr14 * 0.18)
+    )
+
+    //====================================================
+    // SHOCK RECOVERY ENGINE
+    //====================================================
+    recoveryHigh5 = ta.highest(high[1], 5)
+    recoveryLow5 = ta.lowest(low[1], 5)
+
+    bullRecoveryAgeOK = (
+        bearShockRecoveryLock and
+        not na(bearShockBar) and
+        bar_index - bearShockBar >= 3
+    )
+
+    bearRecoveryAgeOK = (
+        bullShockRecoveryLock and
+        not na(bullShockBar) and
+        bar_index - bullShockBar >= 3
+    )
+
+    bullEMA21Turn = ema21 > ema21[1] and ema21[1] >= ema21[2]
+    bearEMA21Turn = ema21 < ema21[1] and ema21[1] <= ema21[2]
+
+    bullVWAPHold = close > vwap and close[1] > vwap[1]
+    bearVWAPHold = close < vwap and close[1] < vwap[1]
+
+    bullEMA21Hold = close > ema21 and close[1] > ema21[1]
+    bearEMA21Hold = close < ema21 and close[1] < ema21[1]
+
+    bullRecoveryConfirmed = (
+        true and
+        bullRecoveryAgeOK and
+        ema9 > ema21 and
+        ema9 > ema9[1] and
+        bullEMA21Turn and
+        bullVWAPHold and
+        bullEMA21Hold and
+        close > ema9 and
+        close > recoveryHigh5 and
+        rsi >= 55 and
+        rsi > rsi[1]
+    )
+
+    bearRecoveryConfirmed = (
+        true and
+        bearRecoveryAgeOK and
+        ema9 < ema21 and
+        ema9 < ema9[1] and
+        bearEMA21Turn and
+        bearVWAPHold and
+        bearEMA21Hold and
+        close < ema9 and
+        close < recoveryLow5 and
+        rsi <= 45 and
+        rsi < rsi[1]
+    )
+
+    if bearShockRecoveryLock and bullRecoveryConfirmed
+        bearShockRecoveryLock := false
+        bearShockBar := na
+
+    if bullShockRecoveryLock and bearRecoveryConfirmed
+        bullShockRecoveryLock := false
+        bullShockBar := na
+
+    //====================================================
+    // FINAL ENTRY SIGNALS
+    //====================================================
+    regularCallMomentum = (
+        classicCallMomentum or
+        callContinuationMomentum or
+        pressureCallMomentum or
+        cleanBullContinuation
+    )
+
+    regularPutMomentum = (
+        classicPutMomentum or
+        putContinuationMomentum or
+        pressurePutMomentum or
+        cleanBearContinuation
+    )
+
+    rawCallMomentumEntry = (
+        earlySurgeMC or
+        shockCallMomentum or
+        (
+            regularCallMomentum and
+            not strongBearContext and
+            not lateBullEntry
+        )
+    )
+
+    rawPutMomentumEntry = (
+        earlyCrashMP or
+        shockPutMomentum or
+        (
+            regularPutMomentum and
+            not strongBullContext and
+            not lateBearEntry
+        )
+    )
+
+    momentumRepeatBars = 9
+
+    mcRepeatOK = (
+        na(lastMCBar) or
+        bar_index - lastMCBar > momentumRepeatBars or
+        (
+            bar_index - lastMCBar >= 5 and
+            cleanBullContinuation and
+            close > recentHigh3 + atr14 * 0.22
+        )
+    )
+
+    mpRepeatOK = (
+        na(lastMPBar) or
+        bar_index - lastMPBar > momentumRepeatBars or
+        (
+            bar_index - lastMPBar >= 5 and
+            cleanBearContinuation and
+            close < recentLow3 - atr14 * 0.22
+        )
+    )
+
+    callMomentumEntry = (
+        rawCallMomentumEntry and
+        not bearShockRecoveryLock and
+        mcRepeatOK
+    )
+
+    putMomentumEntry = (
+        rawPutMomentumEntry and
+        not bullShockRecoveryLock and
+        mpRepeatOK
+    )
+
+    callEntrySignal = (
+        (callNormalEntry or callFastEntry) and
+        not callMomentumEntry and
+        not strongBearContext and
+        not lateBullEntry
+    )
+
+    putEntrySignal = (
+        (putNormalEntry or putFastEntry) and
+        not putMomentumEntry and
+        not strongBullContext and
+        not lateBearEntry
+    )
+
+    if callMomentumEntry
+        lastMCBar := bar_index
+
+    if putMomentumEntry
+        lastMPBar := bar_index
+
+    //====================================================
+    // RECORD SHOCK REGIMES
+    //====================================================
+    if earlyCrashMP
+        bearShockRecoveryLock := true
+        bearShockBar := bar_index
+
+        bullShockRecoveryLock := false
+        bullShockBar := na
+
+    if callMomentumEntry and (earlySurgeMC or shockCallMomentum)
+        bullShockRecoveryLock := true
+        bullShockBar := bar_index
+
+        bearShockRecoveryLock := false
+        bearShockBar := na
+
+    //====================================================
+    // ACTIVE TRADE TRACKING
+    //====================================================
+    if state == 2
+        if na(peakPrice) or high > peakPrice
+            peakPrice := high
+            peakBar := bar_index
+
+    if state == -2
+        if na(troughPrice) or low < troughPrice
+            troughPrice := low
+            troughBar := bar_index
+
+    barsHeld = na(entryBar) ? 0 : bar_index - entryBar
+    holdOK = momentumTrade ? barsHeld >= momentumMinHold : barsHeld >= normalMinHold
+
+    //====================================================
+    // FAVORABLE EXCURSION
+    //====================================================
+    callMFE = state == 2 and not na(entryPrice) and not na(peakPrice) ? peakPrice - entryPrice : 0.0
+    putMFE = state == -2 and not na(entryPrice) and not na(troughPrice) ? entryPrice - troughPrice : 0.0
+
+    callHadStrongRun = callMFE >= atr14 * 1.15
+    putHadStrongRun = putMFE >= atr14 * 1.15
+
+    barsSincePeak = na(peakBar) ? 999 : bar_index - peakBar
+    barsSinceTrough = na(troughBar) ? 999 : bar_index - troughBar
+
+    recentCallPeak = barsSincePeak <= 4
+    recentPutTrough = barsSinceTrough <= 4
+
+    //====================================================
+    // STRONG TREND PROTECTION
+    //====================================================
+    callStrongTrend = (
+        state == 2 and
+        ema9 > ema21 and
+        ema9 >= ema9[1] and
+        ema21 >= ema21[1] and
+        close > ema21 and
+        close > vwap and
+        rsi >= 55
+    )
+
+    putStrongTrend = (
+        state == -2 and
+        ema9 < ema21 and
+        ema9 <= ema9[1] and
+        ema21 <= ema21[1] and
+        close < ema21 and
+        close < vwap and
+        rsi <= 45
+    )
+
+    callTrendStillHealthy = (
+        state == 2 and
+        ema9 > ema21 and
+        ema21 >= ema21[1] and
+        close > ema21 and
+        close > vwap and
+        spread > momentumMinSpread and
+        rsi >= 52
+    )
+
+    putTrendStillHealthy = (
+        state == -2 and
+        ema9 < ema21 and
+        ema21 <= ema21[1] and
+        close < ema21 and
+        close < vwap and
+        spread > momentumMinSpread and
+        rsi <= 48
+    )
+
+    //====================================================
+    // SHOCK EXIT
+    //====================================================
+    callShockCandle = close < open and bodySize > atr14 * 0.72
+
+    callShockRetrace = (
+        not na(peakPrice) and
+        peakPrice - close > atr14 * 0.90
+    )
+
+    callShockStructure = close < low[1]
+    callShockEMA = close < ema9
+    callShockRSI = rsi < rsi[1] and rsi < 60
+    callShockVolume = not na(volAvg20) and volume > volAvg20 * 1.15
+
+    callShockScore = (
+        (callShockStructure ? 1 : 0) +
+        (callShockEMA ? 1 : 0) +
+        (callShockRSI ? 1 : 0) +
+        (callShockVolume ? 1 : 0)
+    )
+
+    callShockSevereDamage = (
+        close < ema21 or
+        close < vwap or
+        bodySize > atr14 * 1.00 or
+        (callShockRetrace and rsi < 48)
+    )
+
+    callShockExit = (
+        true and
+        state == 2 and
+        holdOK and
+        callHadStrongRun and
+        recentCallPeak and
+        callShockCandle and
+        callShockRetrace and
+        callShockScore >= 2 and
+        (not callTrendStillHealthy or callShockSevereDamage)
+    )
+
+    putShockCandle = close > open and bodySize > atr14 * 0.72
+
+    putShockRetrace = (
+        not na(troughPrice) and
+        close - troughPrice > atr14 * 0.90
+    )
+
+    putShockStructure = close > high[1]
+    putShockEMA = close > ema9
+    putShockRSI = rsi > rsi[1] and rsi > 40
+    putShockVolume = not na(volAvg20) and volume > volAvg20 * 1.15
+
+    putShockScore = (
+        (putShockStructure ? 1 : 0) +
+        (putShockEMA ? 1 : 0) +
+        (putShockRSI ? 1 : 0) +
+        (putShockVolume ? 1 : 0)
+    )
+
+    putShockSevereDamage = (
+        close > ema21 or
+        close > vwap or
+        bodySize > atr14 * 1.00 or
+        (putShockRetrace and rsi > 52)
+    )
+
+    putShockExit = (
+        true and
+        state == -2 and
+        holdOK and
+        putHadStrongRun and
+        recentPutTrough and
+        putShockCandle and
+        putShockRetrace and
+        putShockScore >= 2 and
+        (not putTrendStillHealthy or putShockSevereDamage)
+    )
+
+    //====================================================
+    // CALL TREND EXIT
+    //====================================================
+    callBelowEMA9 = close < ema9
+    callPreviousLowBreak = close < low[1]
+    callRSIWeak = rsi < 50
+
+    callLargeBear = close < open and not na(bodyAvg20) and bodySize > bodyAvg20 * 1.30
+
+    callATRWeak = (
+        not na(peakPrice) and
+        peakPrice - close > atr14 * 1.05
+    )
+
+    callTrendWeakScore = (
+        (callPreviousLowBreak ? 1 : 0) +
+        (callRSIWeak ? 1 : 0) +
+        (callLargeBear ? 1 : 0) +
+        (callATRWeak ? 1 : 0)
+    )
+
+    callEarlyRetrace = (
+        not na(peakPrice) and
+        peakPrice - close > atr14 * 0.72
+    )
+
+    callEarlyBearBody = close < open and not na(bodyAvg20) and bodySize > bodyAvg20 * 0.85
+    callEarlyRSI = rsi < rsi[1] and rsi < 56
+
+    callEarlyWeakScore = (
+        (callPreviousLowBreak ? 1 : 0) +
+        (callEarlyRetrace ? 1 : 0) +
+        (callEarlyBearBody ? 1 : 0) +
+        (callEarlyRSI ? 1 : 0)
+    )
+
+    callSevereDamage = (
+        close < ema21 or
+        close < vwap or
+        bodySize > atr14 * 0.72 or
+        (callEarlyRetrace and rsi < 48)
+    )
+
+    callDamageExit = (
+        true and
+        state == 2 and
+        barsHeld >= 2 and
+        not callShockExit and
+        close < ema9 and
+        close < low[1] and
+        rsi < rsi[1] and
+        rsi < 58 and
+        (
+            callEarlyRetrace or
+            (callEarlyBearBody and bodySize > atr14 * 0.42)
+        ) and
+        (
+            not whipsawZone or
+            callSevereDamage
+        ) and
+        (
+            not callTrendStillHealthy or
+            callSevereDamage
+        )
+    )
+
+    callEarlyExit = (
+        true and
+        state == 2 and
+        barsHeld >= 2 and
+        not callShockExit and
+        not callStrongTrend and
+        not callTrendStillHealthy and
+        not whipsawZone and
+        callBelowEMA9 and
+        callEarlyWeakScore >= 3
+    )
+
+    callFullTrendExit = (
+        true and
+        state == 2 and
+        holdOK and
+        not callShockExit and
+        not callStrongTrend and
+        not callTrendStillHealthy and
+        callBelowEMA9 and
+        callTrendWeakScore >= 2
+    )
+
+    callDeteriorationScore = (
+        (close < vwap ? 1 : 0) +
+        (close < ema21 ? 1 : 0) +
+        (rsi < 50 ? 1 : 0) +
+        (ema9 < ema9[1] ? 1 : 0)
+    )
+
+    callFastWeakExit = (
+        true and
+        state == 2 and
+        barsHeld >= 2 and
+        not callShockExit and
+        not callTrendStillHealthy and
+        not whipsawZone and
+        close < ema9 and
+        close < low[1] and
+        rsi < rsi[1] and
+        bodySize > atr14 * 0.30 and
+        callDeteriorationScore >= 2
+    )
+
+    callTrendExit = (
+        callDamageExit or
+        callEarlyExit or
+        callFullTrendExit or
+        callFastWeakExit
+    )
+
+    //====================================================
+    // PUT TREND EXIT
+    //====================================================
+    putAboveEMA9 = close > ema9
+    putPreviousHighBreak = close > high[1]
+    putRSIWeak = rsi > 50
+
+    putLargeBull = close > open and not na(bodyAvg20) and bodySize > bodyAvg20 * 1.30
+
+    putATRWeak = (
+        not na(troughPrice) and
+        close - troughPrice > atr14 * 1.05
+    )
+
+    putTrendWeakScore = (
+        (putPreviousHighBreak ? 1 : 0) +
+        (putRSIWeak ? 1 : 0) +
+        (putLargeBull ? 1 : 0) +
+        (putATRWeak ? 1 : 0)
+    )
+
+    putEarlyRetrace = (
+        not na(troughPrice) and
+        close - troughPrice > atr14 * 0.72
+    )
+
+    putEarlyBullBody = close > open and not na(bodyAvg20) and bodySize > bodyAvg20
+    putEarlyRSI = rsi > rsi[1] and rsi > 44
+
+    putEarlyWeakScore = (
+        (putPreviousHighBreak ? 1 : 0) +
+        (putEarlyRetrace ? 1 : 0) +
+        (putEarlyBullBody ? 1 : 0) +
+        (putEarlyRSI ? 1 : 0)
+    )
+
+    putSevereDamage = (
+        close > ema21 or
+        close > vwap or
+        bodySize > atr14 * 0.72 or
+        (putEarlyRetrace and rsi > 52)
+    )
+
+    putDamageExit = (
+        true and
+        state == -2 and
+        barsHeld >= 2 and
+        not putShockExit and
+        close > ema9 and
+        close > high[1] and
+        rsi > rsi[1] and
+        rsi > 42 and
+        (
+            putEarlyRetrace or
+            (putEarlyBullBody and bodySize > atr14 * 0.42)
+        ) and
+        (
+            not whipsawZone or
+            putSevereDamage
+        ) and
+        (
+            not putTrendStillHealthy or
+            putSevereDamage
+        )
+    )
+
+    putEarlyExit = (
+        true and
+        state == -2 and
+        barsHeld >= 2 and
+        not putShockExit and
+        not putStrongTrend and
+        not putTrendStillHealthy and
+        not whipsawZone and
+        putAboveEMA9 and
+        putEarlyWeakScore >= 3
+    )
+
+    putFullTrendExit = (
+        true and
+        state == -2 and
+        holdOK and
+        not putShockExit and
+        not putStrongTrend and
+        not putTrendStillHealthy and
+        putAboveEMA9 and
+        putTrendWeakScore >= 2
+    )
+
+    putDeteriorationScore = (
+        (close > vwap ? 1 : 0) +
+        (close > ema21 ? 1 : 0) +
+        (rsi > 50 ? 1 : 0) +
+        (ema9 > ema9[1] ? 1 : 0)
+    )
+
+    putFastWeakExit = (
+        true and
+        state == -2 and
+        barsHeld >= 2 and
+        not putShockExit and
+        not putTrendStillHealthy and
+        not whipsawZone and
+        close > ema9 and
+        close > high[1] and
+        rsi > rsi[1] and
+        bodySize > atr14 * 0.30 and
+        putDeteriorationScore >= 2
+    )
+
+    putTrendExit = (
+        putDamageExit or
+        putEarlyExit or
+        putFullTrendExit or
+        putFastWeakExit
+    )
+
+    //====================================================
+    // HARD EXIT
+    //====================================================
+    callEMA21Break = close < ema21
+    callVWAPBreak = close < vwap
+    callEMACross = ema9 < ema21
+
+    callHardExit = (
+        true and
+        state == 2 and
+        holdOK and
+        not callShockExit and
+        (
+            (callEMA21Break and callVWAPBreak) or
+            (callEMACross and close < ema21)
+        )
+    )
+
+    putEMA21Break = close > ema21
+    putVWAPBreak = close > vwap
+    putEMACross = ema9 > ema21
+
+    putHardExit = (
+        true and
+        state == -2 and
+        holdOK and
+        not putShockExit and
+        (
+            (putEMA21Break and putVWAPBreak) or
+            (putEMACross and close > ema21)
+        )
+    )
+
+    //====================================================
+    // FINAL EXIT
+    //====================================================
+    callExit = callShockExit or callTrendExit or callHardExit
+    putExit = putShockExit or putTrendExit or putHardExit
+
+    //====================================================
+    // EXIT PRIORITY
+    //====================================================
+    rawSxSignal = callShockExit or putShockExit
+
+    rawHxSignal = (
+        not rawSxSignal and
+        (callHardExit or putHardExit)
+    )
+
+    rawXSignal = (
+        not rawSxSignal and
+        not rawHxSignal and
+        (callTrendExit or putTrendExit)
+    )
+
+    exitDisplayCooldownBars = 3
+
+    exitDisplayOK = (
+        na(lastExitDisplayBar) or
+        bar_index - lastExitDisplayBar > exitDisplayCooldownBars
+    )
+
+    sxSignal = rawSxSignal and exitDisplayOK
+    hxSignal = rawHxSignal and exitDisplayOK
+    xSignal = rawXSignal and exitDisplayOK
+
+    if sxSignal or hxSignal or xSignal
+        lastExitDisplayBar := bar_index
+
+    //====================================================
+    // CONTINUATION ENGINE
+    //====================================================
+    ctnCooldownBars = 10
+
+    ctnUpCooldownOK = na(lastCtnUpBar) or bar_index - lastCtnUpBar > ctnCooldownBars
+    ctnDownCooldownOK = na(lastCtnDownBar) or bar_index - lastCtnDownBar > ctnCooldownBars
+
+    ctnHigh3 = ta.highest(high[1], 3)
+    ctnLow3 = ta.lowest(low[1], 3)
+
+    ctnUpStructure = (
+        state == 2 and
+        barsHeld >= 3 and
+        ema9 > ema21 and
+        emaBullSlope and
+        close > ema9 and
+        close > vwap and
+        spread > momentumMinSpread
+    )
+
+    ctnDownStructure = (
+        state == -2 and
+        barsHeld >= 3 and
+        ema9 < ema21 and
+        ema9 < ema9[1] and
+        ema9[1] <= ema9[2] and
+        ema21 <= ema21[1] and
+        close < ema9 and
+        close < ema21 and
+        close < vwap and
+        ema21 - close > atr14 * 0.12 and
+        spread > momentumMinSpread
+    )
+
+    ctnUpMomentum = (
+        rsi >= 55 and
+        rsi <= 76 and
+        rsi >= rsi[1]
+    )
+
+    ctnDownMomentum = (
+        rsi <= 45 and
+        rsi >= 24 and
+        rsi < rsi[1]
+    )
+
+    ctnUpBreak = close > ctnHigh3
+    ctnDownBreak = close < ctnLow3
+
+    ctnUpParticipation = moderateVolume or bodySize > atr14 * 0.38
+    ctnDownParticipation = moderateVolume or bodySize > atr14 * 0.42
+
+    ctnUpSignal = (
+        true and
+        ctnUpCooldownOK and
+        not chopZone and
+        not lateBullEntry and
+        not callExit and
+        ctnUpStructure and
+        ctnUpMomentum and
+        ctnUpBreak and
+        ctnUpParticipation
+    )
+
+    ctnDownSignal = (
+        true and
+        ctnDownCooldownOK and
+        not chopZone and
+        not lateBearEntry and
+        not putExit and
+        ctnDownStructure and
+        ctnDownMomentum and
+        ctnDownBreak and
+        ctnDownParticipation
+    )
+
+    if ctnUpSignal
+        lastCtnUpBar := bar_index
+
+    if ctnDownSignal
+        lastCtnDownBar := bar_index
+
+    //====================================================
+    // STATE MANAGEMENT
+    //====================================================
+    if callPrep
+        state := 1
+        prepBar := bar_index
+    else if putPrep
+        state := -1
+        prepBar := bar_index
+
+    if callMomentumEntry
+        state := 2
+        entryBar := bar_index
+        entryPrice := close
+
+        peakPrice := high
+        peakBar := bar_index
+
+        troughPrice := na
+        troughBar := na
+
+        prepBar := na
+        momentumTrade := true
+
+    else if putMomentumEntry
+        state := -2
+        entryBar := bar_index
+        entryPrice := close
+
+        troughPrice := low
+        troughBar := bar_index
+
+        peakPrice := na
+        peakBar := na
+
+        prepBar := na
+        momentumTrade := true
+
+    else if callEntrySignal
+        state := 2
+        entryBar := bar_index
+        entryPrice := close
+
+        peakPrice := high
+        peakBar := bar_index
+
+        troughPrice := na
+        troughBar := na
+
+        prepBar := na
+        momentumTrade := false
+
+    else if putEntrySignal
+        state := -2
+        entryBar := bar_index
+        entryPrice := close
+
+        troughPrice := low
+        troughBar := bar_index
+
+        peakPrice := na
+        peakBar := na
+
+        prepBar := na
+        momentumTrade := false
+
+    //====================================================
+    // PREP EXPIRATION
+    //====================================================
+    if state == 1 and not na(prepBar)
+        if bar_index - prepBar > prepExpireBars
+            state := 0
+            prepBar := na
+
+    if state == -1 and not na(prepBar)
+        if bar_index - prepBar > prepExpireBars
+            state := 0
+            prepBar := na
+
+    //====================================================
+    // EXIT RESET
+    //====================================================
+    if callExit
+        lastExitDirection := 1
+        lastExitDirectionBar := bar_index
+
+        state := 0
+        exitBar := bar_index
+
+        entryBar := na
+        entryPrice := na
+
+        peakPrice := na
+        peakBar := na
+
+        troughPrice := na
+        troughBar := na
+
+        prepBar := na
+        momentumTrade := false
+
+        lastCtnUpBar := na
+
+    if putExit
+        lastExitDirection := -1
+        lastExitDirectionBar := bar_index
+
+        state := 0
+        exitBar := bar_index
+
+        entryBar := na
+        entryPrice := na
+
+        peakPrice := na
+        peakBar := na
+
+        troughPrice := na
+        troughBar := na
+
+        prepBar := na
+        momentumTrade := false
+
+        lastCtnDownBar := na
+
+    //====================================================
+    // LEG LOCK RESET
+    //====================================================
+    if lastExitDirection == 1 and (ema9 < ema21 or close < vwap)
+        lastExitDirection := 0
+        lastExitDirectionBar := na
+
+    if lastExitDirection == -1 and (ema9 > ema21 or close > vwap)
+        lastExitDirection := 0
+        lastExitDirectionBar := na
+
+    //====================================================
+    // CRASH DISPLAY COOLDOWN
+    //====================================================
+    crashDisplayCooldownBars = 12
+
+    crashDisplayCooldownOK = (
+        na(lastCrashDisplayBar) or
+        bar_index - lastCrashDisplayBar > crashDisplayCooldownBars
+    )
+
+    crashSignalRaw = earlyCrashMP
+
+    crashSignalDisplay = (
+        crashSignalRaw and
+        not crashSignalRaw[1] and
+        crashDisplayCooldownOK
+    )
+
+    if crashSignalDisplay
+        lastCrashDisplayBar := bar_index
+
+    //====================================================
+    // END NORMALIZED V13.16 CONFIRMED ENGINE
+    // Scores rank engine signals only. They do not define the strategy.
+    candleRange = math.max(high - low, syminfo.mintick)
+    volumeBase = ta.sma(volume, 20)[1]
+    rv = not na(volumeBase) and volumeBase > 0 ? volume / volumeBase : 0.0
+    deltaRsi = rsi - rsi[1]
+    bullRange = close > ta.highest(high[1], 5) + atr14 * 0.05
+    bearRange = close < ta.lowest(low[1], 5) - atr14 * 0.05
+    bullFast = close > ta.highest(high[1], 3) + atr14 * 0.03
+    bearFast = close < ta.lowest(low[1], 3) - atr14 * 0.03
+    bearBreak2 = close < ta.lowest(low[1], 2)
+    bullAlignment = (close > ema9 ? 10.0 : 0.0) + (ema9 > ema21 ? 5.0 : 0.0) + (close > vwap ? 5.0 : 0.0) + (ema9 > ema9[1] ? 5.0 : 0.0)
+    bearAlignment = (close < ema9 ? 10.0 : 0.0) + (ema9 < ema21 ? 5.0 : 0.0) + (close < vwap ? 5.0 : 0.0) + (ema9 < ema9[1] ? 5.0 : 0.0)
+    flipCount = ((close > open) != (close[1] > open[1]) ? 1 : 0) + ((close[1] > open[1]) != (close[2] > open[2]) ? 1 : 0) + ((close[2] > open[2]) != (close[3] > open[3]) ? 1 : 0)
+    longScore = bullAlignment + f_points(close > open ? bodySize : 0, atr14 * 0.55, 20) + f_points(rsi - 45, 15, 10) + f_points(deltaRsi, 3, 10) + (bullRange ? 20 : bullFast ? 15 : close > high[1] ? 8 : 0) + f_points(rv, 1.5, 10) + f_points((close - low) / candleRange, 0.8, 5)
+    shortScore = bearAlignment + f_points(close < open ? bodySize : 0, atr14 * 0.55, 20) + f_points(55 - rsi, 15, 10) + f_points(-deltaRsi, 3, 10) + (bearRange ? 20 : bearFast ? 15 : bearBreak2 ? 8 : 0) + f_points(rv, 1.5, 10) + f_points((high - close) / candleRange, 0.8, 5)
+    longScore := math.max(0, longScore - (flipCount >= 2 ? 5 : 0))
+    shortScore := math.max(0, shortScore - (flipCount >= 2 ? 5 : 0))
+    // Match source confirmed alert priority. Raw exits clear tracking even when
+    // source display cooldown hides a label; never leave a ghost position.
+    exitAction = rawSxSignal ? "SX" : rawHxSignal ? "HX" : rawXSignal ? "X" : ""
+    exitSide = callExit ? 1 : putExit ? -1 : 0
+    displayedExit = sxSignal ? "SX" : hxSignal ? "HX" : xSignal ? "X" : ""
+    entryAction = crashSignalDisplay ? (shockCrashPath ? "SCMP" : "CMP") : callMomentumEntry ? "MC" : putMomentumEntry and not earlyCrashMP ? "MP" : callEntrySignal ? "C" : putEntrySignal ? "P" : ""
+    entrySide = entryAction == "MC" or entryAction == "C" ? 1 : entryAction != "" ? -1 : 0
+    continuation = ctnUpSignal ? "CTN_UP" : ctnDownSignal ? "CTN_DOWN" : ""
+    regular = not na(time(timeframe.period, "0930-1600:23456", "America/New_York"))
+    condition = chopZone ? "CHOPPY" : "ENGINE"
+    p = Snapshot.new(close, open, high, low, ema9, ema21, vwap, rsi, atr14, ema9[1], high[1], low[1], time, time_close, time("D"), regular, entryAction, entrySide, exitAction, exitSide, displayedExit, continuation, state == 2 ? 1 : state == -2 ? -1 : 0, longScore, shortScore, condition, whipsawZone, directionEfficiency8, range8 / atr14, rv)
+    Feed.new(p, p[1])
+
+type Position
+    varip int side = 0
+    varip int day = na
+    varip int entryStamp = na
+    varip int lastClosed = na
+    varip int lastExit = na
+    varip float extreme = na
+    varip float extremeRsi = na
+    varip string status = "WAIT FOR NEW BAR"
+    varip string engineEvent = ""
+
+// At the session boundary there may be no next regular source bar.
+// Accept the live object only when its source closing time is already reached.
+f_closed(Feed feed) =>
+    result = feed.closed
+    current = feed.live
+    if not na(current)
+        if current.ended == time("5") and current.ended <= timenow
+            result := current
+    result
+
+f_clean(string symbol) =>
+    parts = str.split(symbol, ":")
+    array.get(parts, array.size(parts) - 1)
+
+f_message(string symbol, string action, Snapshot p, int side, string reason, bool confirmed) =>
+    name = f_clean(symbol)
+    score = side == 1 ? p.longScore : p.shortScore
+    human = name + " | " + action + " | $" + str.tostring(p.c, "#.##") + "\\nMomentum: " + str.tostring(score, "#.0") + "/100 (technical)\\nNote: " + reason
+    eventId = symbol + "-" + str.tostring(p.stamp) + "-" + action + (confirmed ? "-C" : "-L")
+    '{"secret":"' + webhookSecret + '","observed_at":"' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '","relative_volume":' + str.tostring(p.relativeVolume, "#.####") + ',"extension_atr":' + str.tostring(math.abs(p.c - p.e9) / p.atr, "#.####") + ',"directional_momentum_atr":' + str.tostring(math.max(0, side * (p.c - p.o) / p.atr), "#.####") + ',"ticker":"' + name + '","action":"' + action + '","price":' + str.tostring(p.c, "#.########") + ',"rsi":' + str.tostring(p.rsi, "#.0") + ',"timeframe":"5m","source":"MF_V13_27_TV_INFORMATION_TEST","direction":"' + (side == 1 ? "LONG" : "SHORT") + '","momentum_score":' + str.tostring(score, "#.0") + ',"market_condition":"' + p.condition + '","condition_scope":"SYMBOL","reason":"' + reason + '","confirmed":' + (confirmed ? 'true' : 'false') + ',"test":true,"bank":' + str.tostring(bank) + ',"source_whipsaw":' + (p.sourceWhipsaw ? 'true' : 'false') + ',"efficiency8":' + str.tostring(p.travelEfficiency8, "#.####") + ',"range_atr8":' + str.tostring(p.rangeAtr8, "#.####") + ',"bar_end":"' + str.format_time(p.ended, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '","bar_time":' + str.tostring(p.stamp) + ',"event_id":"' + eventId + '","telegram_text":"' + human + '"}'
+
+// Primitive varip arrays retain observations across realtime tick rollback.
+varip array<string> auditRows = array.new_string()
+f_record(string symbol, string action, Snapshot p, string result) =>
+    row = str.format_time(timenow, "MM-dd HH:mm:ss", "America/New_York") + " | 5m " + str.format_time(p.stamp, "MM-dd HH:mm", "America/New_York") + " | " + f_clean(symbol) + " | " + action + " | " + result
+    array.unshift(auditRows, row)
+    if array.size(auditRows) > 30
+        array.pop(auditRows)
+
+f_publish(string symbol, string action, Snapshot p, int side, string reason, bool confirmed) =>
+    f_record(symbol, action, p, (enableAlerts ? "ALERT REQUESTED: " : "DRY ACCEPTED: ") + reason)
+    if enableAlerts and testWindow and p.stamp >= testOpen and p.ended <= testClose
+        alert(f_message(symbol, action, p, side, reason, confirmed), alert.freq_all)
+
+f_exit(Position pos, Snapshot p, string symbol, string action, string reason, bool confirmed) =>
+    f_publish(symbol, action, p, pos.side, reason, confirmed)
+    pos.side := 0
+    pos.extreme := na
+    pos.extremeRsi := na
+    pos.lastExit := time("5")
+    pos.status := action
+
+// Exact V13.16 live X/SX price/RSI thresholds. No V13.21 hot-reversal override.
+f_liveExit(Position pos, Snapshot p) =>
+    retrace = pos.side == 1 ? pos.extreme - p.c : p.c - pos.extreme
+    giveback = pos.side == 1 ? pos.extremeRsi - p.rsi : p.rsi - pos.extremeRsi
+    body = math.abs(p.c - p.o)
+    counterBar = pos.side == 1 ? p.c < p.o : p.c > p.o
+    damage = pos.side == 1 ? p.c < p.e9 or p.c < p.previousLow : p.c > p.e9 or p.c > p.previousHigh
+    healthy = pos.side == 1 ? p.e9 > p.e21 and p.e9 >= p.previousE9 and p.c > p.e9 and p.c > p.vw and p.rsi >= 52 : p.e9 < p.e21 and p.e9 <= p.previousE9 and p.c < p.e9 and p.c < p.vw and p.rsi <= 48
+    score = (retrace > p.atr * 0.42 ? 1 : 0) + (giveback >= 5 ? 1 : 0) + (counterBar and body > p.atr * 0.24 ? 1 : 0) + (damage ? 1 : 0)
+    x = retrace > p.atr * 0.42 and giveback >= 5 and score >= 3 and (not healthy or retrace > p.atr * 0.62)
+    sxDamage = damage or (pos.side == 1 ? p.c < p.vw : p.c > p.vw)
+    sx = retrace > p.atr * 0.65 and giveback >= 6 and counterBar and body > p.atr * 0.45 and sxDamage
+    sx ? "SX" : x ? "X" : ""
+
+bankSymbols = switch bank
+    1 => "BATS:SPY,BATS:QQQ,BATS:NVDA,BATS:TSLA,BATS:AVGO,BATS:AMD,BATS:META,BATS:AAPL,BATS:MSFT,BATS:AMZN"
+    2 => "BATS:PLTR,BATS:PANW,BATS:SNDK,BATS:GOOG,BATS:RDDT,BATS:HOOD,BATS:COIN,BATS:JPM,BATS:AXP,BATS:V"
+    3 => "BATS:XOM,BATS:CVX,BATS:UNH,BATS:JNJ,BATS:CAT,BATS:AVAV,BATS:TGT,BATS:SHOP,BATS:UAL,BATS:ENPH"
+    4 => "BATS:DDOG,BATS:IREN,BATS:ARM,BATS:ANET,BATS:IBM,BATS:QCOM,BATS:CRWD,BATS:SNOW,BATS:MSTR,BATS:CRCL"
+    5 => "BATS:ORCL,BATS:MRVL,BATS:DELL,BATS:TSM,BATS:LITE,BATS:NOW,BATS:CRM,BATS:GLW,BATS:SMCI,BATS:ADBE"
+    6 => "BATS:TWLO,BATS:NET,BATS:ASTS,BATS:MRNA,BATS:HPE,BATS:HIMS,BATS:ON,BATS:WMT,BATS:NBIS,BATS:INTC"
+    => "BATS:AAOI,BATS:MU,BATS:DIS,BATS:NFLX,BATS:COST,BATS:BA,BATS:GS,BATS:BAC,BATS:UBER,BATS:AMAT"
+var array<string> symbols = str.split(bankSymbols, ",")
+varip array<Position> positions = array.new<Position>()
+if barstate.isfirst
+    for i = 0 to 9
+        array.push(positions, Position.new())
+        for j = 0 to 9
+            if j < i and array.get(symbols, i) == array.get(symbols, j)
+                runtime.error("Ticker bank must have 10 unique symbols.")
+
+feeds = array.new<Feed>()
+for i = 0 to 9
+    feed = request.security(ticker.modify(array.get(symbols, i), session=session.regular), "5", f_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true, calc_bars_count=1000)
+    array.push(feeds, feed)
+
+varip int lastBatch = na
+varip int eligibleBucket = na
+newBatch = false
+if barstate.isrealtime
+    if na(lastBatch)
+        lastBatch := time("5")
+    else if lastBatch != time("5")
+        newBatch := true
+        eligibleBucket := time("5")
+        lastBatch := time("5")
+
+evaluationWindow = testWindow and not na(eligibleBucket) and eligibleBucket == time("5") and timenow >= eligibleBucket and timenow - eligibleBucket <= 60000
+
+// Read-only instrumentation; these fields never participate in signal selection.
+varip int diagStarted = na
+varip int diagLastUpdate = na
+varip int diagUpdates = 0
+varip int diagBoundaries = 0
+varip array<int> diagChecks = array.new_int(10, 0)
+varip array<int> diagSkipped = array.new_int(10, 0)
+varip array<string> diagBoundaryResult = array.new_string(10, "WAIT FIRST BOUNDARY")
+
+f_diagTime(int stamp) =>
+    na(stamp) ? "--" : str.format_time(stamp, "HH:mm:ss", "America/New_York")
+
+// Same required fields and timestamp comparison as validClosed below.
+f_diagClosed(Feed feed) =>
+    reason = "NO FEED"
+    if not na(feed)
+        q = f_closed(feed)
+        reason := "NO CLOSED BAR"
+        if not na(q)
+            reason := na(q.c) or na(q.atr) or q.atr <= 0 or na(q.rsi) ? "MISSING PRICE/ATR/RSI" : not q.regular ? "OUTSIDE REGULAR SESSION" : q.ended != time("5") ? "CLOSED TIME MISMATCH" : "READY"
+    reason
+
+if barstate.isrealtime
+    if na(diagStarted)
+        diagStarted := timenow
+    diagLastUpdate := timenow
+    diagUpdates += 1
+    if newBatch
+        diagBoundaries += 1
+        for i = 0 to 9
+            reason = f_diagClosed(array.get(feeds, i))
+            array.set(diagBoundaryResult, i, reason)
+            if reason != "READY"
+                array.set(diagSkipped, i, array.get(diagSkipped, i) + 1)
+
+candidates = array.new_int(10, 0)
+scores = array.new_float(10, -1)
+if barstate.isrealtime
+    for i = 0 to 9
+        feed = array.get(feeds, i)
+        pos = array.get(positions, i)
+        symbol = array.get(symbols, i)
+        if not na(feed)
+            p = feed.live
+            q = f_closed(feed)
+            validLive = false
+            validClosed = false
+            if not na(p)
+                validLive := not na(p.c) and not na(p.atr) and p.atr > 0 and not na(p.rsi) and p.regular and p.stamp == time("5")
+                if p.regular and p.stamp == time("5") and (na(pos.day) or pos.day != p.day)
+                    // Source engine is session-reset, not an overnight position manager.
+                    pos.side := 0
+                    pos.extreme := na
+                    pos.extremeRsi := na
+                    pos.lastExit := na
+                    pos.entryStamp := na
+                    pos.day := p.day
+                    pos.status := "SESSION RESET"
+            if not na(q)
+                // ended==host bucket allows the final 15:55 bar at 16:00.
+                validClosed := not na(q.c) and not na(q.atr) and q.atr > 0 and not na(q.rsi) and q.regular and q.ended == time("5")
+            if evaluationWindow and validClosed and q.stamp >= testOpen and (q.entryAction == "" or q.exitAction != "" or validLive or q.ended >= testClose) and (na(pos.lastClosed) or pos.lastClosed != q.stamp)
+                pos.lastClosed := q.stamp
+                pos.engineEvent := q.exitAction != "" ? q.exitAction : q.entryAction != "" ? q.entryAction : q.continuation
+                array.set(diagChecks, i, array.get(diagChecks, i) + 1)
+                array.set(diagBoundaryResult, i, pos.engineEvent == "" ? "CHECKED / NO EVENT" : "CHECKED / " + pos.engineEvent)
+                if q.exitAction != "" and (pos.side == 0 or q.exitSide != pos.side)
+                    f_record(symbol, q.exitAction, q, "IGNORED: no matching tracked position")
+                if q.entryAction != "" and q.exitAction != ""
+                    f_record(symbol, q.entryAction, q, "SKIPPED: exit priority")
+                else if q.entryAction != "" and pos.side != 0
+                    f_record(symbol, q.entryAction, q, "SKIPPED: position already tracked")
+                if q.continuation != "" and (pos.side == 0 or q.stateSide != pos.side or (q.exitAction != "" and q.exitSide == pos.side))
+                    f_record(symbol, q.continuation, q, "IGNORED: no continuing tracked position")
+                // Exits first. Only accepted/dry-run entries can generate exits.
+                if pos.side != 0 and q.exitSide == pos.side and q.exitAction != ""
+                    f_exit(pos, q, symbol, q.exitAction, q.displayedExit == "" ? "Engine exit; chart label suppressed by display cooldown" : "V13.16 confirmed exit", true)
+                if pos.side != 0 and q.continuation != "" and q.stateSide == pos.side
+                    f_publish(symbol, q.continuation, q, pos.side, "Continuation of tracked signal; not a new entry", true)
+                if q.entryAction != "" and q.exitAction == "" and pos.side == 0
+                    score = q.entrySide == 1 ? q.longScore : q.shortScore
+                    if q.stateSide != q.entrySide
+                        pos.status := "DISPLAY ONLY / NO ENGINE POSITION"
+                        f_record(symbol, q.entryAction, q, "BLOCKED: " + pos.status)
+                    else if q.ended >= timestamp("America/New_York", year(q.stamp, "America/New_York"), month(q.stamp, "America/New_York"), dayofmonth(q.stamp, "America/New_York"), 16, 0)
+                        pos.status := "SESSION CLOSED"
+                        f_record(symbol, q.entryAction, q, "BLOCKED: " + pos.status)
+                    else if not validLive
+                        pos.status := "STALE / NO LIVE DATA"
+                        f_record(symbol, q.entryAction, q, "BLOCKED: " + pos.status)
+                    else if not na(pos.lastExit) and pos.lastExit == time("5")
+                        pos.status := "EXIT THIS BAR"
+                        f_record(symbol, q.entryAction, q, "BLOCKED: " + pos.status)
+                    else if useScore and score < minScore
+                        pos.status := "SCORE BLOCK"
+                        f_record(symbol, q.entryAction, q, "BLOCKED: " + pos.status)
+                    else
+                        array.set(candidates, i, q.entrySide)
+                        array.set(scores, i, score)
+                        pos.status := "CANDIDATE"
+            if validLive and liveExits and pos.side != 0
+                // First observed entry bucket uses observed close; subsequent
+                // buckets may use high/low without including pre-entry prices.
+                sourceExtreme = p.stamp == pos.entryStamp ? p.c : pos.side == 1 ? p.h : p.l
+                pos.extreme := pos.side == 1 ? math.max(pos.extreme, sourceExtreme) : math.min(pos.extreme, sourceExtreme)
+                pos.extremeRsi := pos.side == 1 ? math.max(pos.extremeRsi, p.rsi) : math.min(pos.extremeRsi, p.rsi)
+                action = f_liveExit(pos, p)
+                if action != ""
+                    f_exit(pos, p, symbol, action, "V13.16 live exit", false)
+        else
+            pos.status := "NO DATA"
+    if evaluationWindow
+        active = 0
+        for i = 0 to 9
+            pos = array.get(positions, i)
+            active += pos.side != 0 ? 1 : 0
+        slots = useLimits ? math.min(topN, math.max(0, maxActive - active)) : 10
+        if slots > 0
+            for rank = 1 to slots
+                best = -1
+                bestScore = -1.0
+                for i = 0 to 9
+                    if array.get(candidates, i) != 0 and array.get(scores, i) > bestScore
+                        best := i
+                        bestScore := array.get(scores, i)
+                if best >= 0
+                    pos = array.get(positions, best)
+                    feed = array.get(feeds, best)
+                    q = f_closed(feed)
+                    p = feed.live
+                    pos.side := array.get(candidates, best)
+                    pos.entryStamp := p.stamp
+                    pos.extreme := p.c
+                    pos.extremeRsi := p.rsi
+                    pos.status := (enableAlerts ? "SENT " : "DRY ") + q.entryAction
+                    f_publish(array.get(symbols, best), q.entryAction, q, pos.side, "V13.16 completed-bar engine entry", true)
+                    active += 1
+                    array.set(candidates, best, 0)
+        for i = 0 to 9
+            if array.get(candidates, i) != 0
+                pos = array.get(positions, i)
+                pos.status := active >= maxActive ? "ACTIVE LIMIT" : "BATCH RANK LIMIT"
+                rejectedFeed = array.get(feeds, i)
+                rejected = f_closed(rejectedFeed)
+                f_record(array.get(symbols, i), rejected.entryAction, rejected, "BLOCKED: " + pos.status)
+
+var table dashboard = showTable and not showEventLog and not showDiagnostics ? table.new(position.top_right, 6, 12, border_width=1) : na
+if barstate.islast and showTable and not showEventLog and not showDiagnostics
+    table.cell(dashboard, 0, 0, "MONDAY BANK " + str.tostring(bank))
+    table.cell(dashboard, 1, 0, "LONG")
+    table.cell(dashboard, 2, 0, "SHORT")
+    table.cell(dashboard, 3, 0, "ENGINE EVENT")
+    table.cell(dashboard, 4, 0, "TRACKING")
+    table.cell(dashboard, 5, 0, "RESULT / FILTER")
+    for i = 0 to 9
+        feed = array.get(feeds, i)
+        pos = array.get(positions, i)
+        table.cell(dashboard, 0, i + 1, f_clean(array.get(symbols, i)))
+        if not na(feed)
+            q = f_closed(feed)
+            if not na(q)
+                table.cell(dashboard, 1, i + 1, str.tostring(q.longScore, "#.0"))
+                table.cell(dashboard, 2, i + 1, str.tostring(q.shortScore, "#.0"))
+                eventText = q.exitAction != "" ? q.exitAction : q.entryAction != "" ? q.entryAction : q.continuation
+                table.cell(dashboard, 3, i + 1, eventText)
+        table.cell(dashboard, 4, i + 1, pos.side == 1 ? "LONG" : pos.side == -1 ? "SHORT" : "FLAT")
+        table.cell(dashboard, 5, i + 1, pos.status)
+    table.cell(dashboard, 0, 11, enableAlerts ? "ALERTS ON" : "DRY RUN")
+    table.cell(dashboard, 3, 11, "CLOSED 5m ENTRY")
+    table.cell(dashboard, 4, 11, liveExits ? "LIVE EXIT" : "CLOSED EXIT")
+    table.cell(dashboard, 5, 11, useLimits ? "LIMITS ON" : "ALL SIGNALS")
+
+// This is an observation log, not reconstructed history or delivery confirmation.
+var table auditTable = showTable and showEventLog and not showDiagnostics ? table.new(position.top_left, 1, 32, border_width=1) : na
+if barstate.islast and showTable and showEventLog and not showDiagnostics
+    table.cell(auditTable, 0, 0, "V13.26 | OBSERVED ET | SOURCE BAR ET | SYMBOL | EVENT | DECISION", text_size=size.small)
+    for i = 0 to 29
+        line = i < array.size(auditRows) ? array.get(auditRows, i) : ""
+        if i == 0 and array.size(auditRows) == 0
+            line := "No observations yet. Recording starts on the next live 5m boundary."
+        table.cell(auditTable, 0, i + 1, line, text_size=size.small)
+    table.cell(auditTable, 0, 31, "LAST 30 OBSERVATIONS | RELOAD CLEARS LOG | " + (enableAlerts ? "ALERTS ON" : "DRY RUN / ALERTS OFF"), text_size=size.small)
+
+
+// All times below are ET; compare bar closing time against HOST 5m.
+var table diagnosticTable = showTable and showDiagnostics ? table.new(position.top_left, 8, 15, border_width=1, bgcolor=color.white) : na
+if barstate.isfirst and not na(diagnosticTable)
+    table.merge_cells(diagnosticTable, 0, 0, 7, 0)
+    table.merge_cells(diagnosticTable, 0, 1, 7, 1)
+    table.merge_cells(diagnosticTable, 0, 2, 7, 2)
+    table.merge_cells(diagnosticTable, 0, 14, 7, 14)
+if barstate.islast and showTable and showDiagnostics
+    table.cell(diagnosticTable, 0, 0, "V13.26 BANK " + str.tostring(bank) + " | ET | Started " + f_diagTime(diagStarted) + " | Updated " + f_diagTime(diagLastUpdate) + " | Executions " + str.tostring(diagUpdates), text_color=color.black, text_size=size.small)
+    table.cell(diagnosticTable, 0, 1, "HOST 5m " + f_diagTime(time("5")) + " | Boundaries " + str.tostring(diagBoundaries) + " | Event rows " + str.tostring(array.size(auditRows)) + " | " + (enableAlerts ? "ALERTS ON" : "ALERTS OFF"), text_color=color.black, text_size=size.small)
+    latest = array.size(auditRows) > 0 ? array.get(auditRows, 0) : "No signal events recorded since this run started."
+    table.cell(diagnosticTable, 0, 2, latest, text_color=color.black, text_size=size.small)
+    headings = array.from("SYMBOL", "LIVE BAR", "CLOSED END", "LAST CHECKED", "CHECKS", "SKIPS", "LAST BOUNDARY", "LAST DECISION")
+    for col = 0 to 7
+        table.cell(diagnosticTable, col, 3, array.get(headings, col), text_color=color.black, text_size=size.small)
+    for i = 0 to diagnosticRows - 1
+        feed = array.get(feeds, i)
+        pos = array.get(positions, i)
+        int liveStamp = na
+        int closedEnd = na
+        if not na(feed)
+            p = feed.live
+            q = f_closed(feed)
+            if not na(p)
+                liveStamp := p.stamp
+            if not na(q)
+                closedEnd := q.ended
+        values = array.from(f_clean(array.get(symbols, i)), f_diagTime(liveStamp), f_diagTime(closedEnd), f_diagTime(pos.lastClosed), str.tostring(array.get(diagChecks, i)), str.tostring(array.get(diagSkipped, i)), array.get(diagBoundaryResult, i), pos.status)
+        for col = 0 to 7
+            table.cell(diagnosticTable, col, i + 4, array.get(values, col), text_color=color.black, text_size=size.small)
+    table.cell(diagnosticTable, 0, 14, "SEP 21 ONLY | " + (testWindow ? "TEST WINDOW OPEN" : "OUTSIDE TEST WINDOW / NO SEND") + " | 60s same-bar retry | CHECKS are evaluations, not deliveries.", text_color=color.black, text_size=size.small)

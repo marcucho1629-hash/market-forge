@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS mf_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -70,7 +71,7 @@ class Transaction:
                      (id,'pending',json.dumps(payload)))
 
 
-def drain(store,send,limit=5):
+def drain(store,send,limit=5,prefix=None,now=None):
     """At-most-once attempt. Ambiguous Telegram timeouts require manual reconciliation.
 
     Never resend an attempted message automatically: Telegram has no idempotency key.
@@ -78,9 +79,15 @@ def drain(store,send,limit=5):
     results=[]
     for _ in range(limit):
         with store.transaction() as tx:
-            row=tx.execute("SELECT id,payload FROM mf_outbox WHERE status='pending' ORDER BY id LIMIT 1").fetchone()
+            row=tx.execute("SELECT id,payload FROM mf_outbox WHERE status='pending' AND (? IS NULL OR id LIKE ?) ORDER BY id LIMIT 1",(prefix, (prefix+'%') if prefix else None)).fetchone()
             if not row: break
             id,payload=row
+            decoded=json.loads(payload)
+            expiry=decoded.get('expires_at')
+            if expiry and datetime.fromisoformat(expiry) <= (now or datetime.now(timezone.utc)):
+                tx.execute("UPDATE mf_outbox SET status='expired' WHERE id=?",(id,))
+                results.append({'id':id,'status':'expired'})
+                continue
             tx.execute("UPDATE mf_outbox SET status='attempting' WHERE id=?",(id,))
         try:
             send(json.loads(payload)['text'])
