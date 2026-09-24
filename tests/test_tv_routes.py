@@ -23,7 +23,7 @@ class Routes(unittest.TestCase):
         routes=[(r.path,tuple(sorted(r.methods))) for r in index.app.routes]
         self.assertEqual(len(routes),len(set(routes)))
     def test_unauthenticated_rejected(self):
-        for path in ['/webhook/tradingview','/tradingview/session','/tradingview/deliver']:
+        for path in ['/webhook/tradingview','/tradingview/session','/tradingview/deliver','/scanner/chart-news/shadow','/scanner/chart-news/documents','/scanner/chart-news/review']:
             self.assertEqual(self.client.post(path,json={}).status_code,401)
     def test_calendar_today_only(self):
         result=self.client.post('/tradingview/session',headers={'Authorization':'Bearer testadmin'},json={'date':'2026-09-22','is_open':False})

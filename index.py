@@ -17,6 +17,34 @@ from scanner.comparison import compare
 
 log=logging.getLogger('market_forge')
 app=FastAPI(title='Market Forge AI')
+
+@app.post('/scanner/chart-news/shadow')
+def chart_news_shadow(data:dict, token=Depends(APIKeyHeader(name='Authorization',auto_error=False))):
+    authorized(token)
+    from scanner.chart_news import shadow_batch
+    try:
+        return shadow_batch(storage(),data,now_utc())
+    except (ValueError,KeyError,TypeError,OverflowError) as exc:
+        raise HTTPException(422,str(exc)) from None
+
+@app.post('/scanner/chart-news/documents')
+def chart_news_documents(data:dict, token=Depends(APIKeyHeader(name='Authorization',auto_error=False))):
+    authorized(token)
+    from scanner.news import import_documents
+    try:
+        return import_documents(storage(),data['documents'],now_utc())
+    except (ValueError,KeyError,TypeError,OverflowError) as exc:
+        raise HTTPException(422,str(exc)) from None
+
+@app.post('/scanner/chart-news/review')
+def chart_news_review(data:dict, token=Depends(APIKeyHeader(name='Authorization',auto_error=False))):
+    authorized(token)
+    from scanner.news import review_document
+    try:
+        return review_document(storage(),data,now_utc())
+    except (ValueError,KeyError,TypeError,OverflowError) as exc:
+        raise HTTPException(422,str(exc)) from None
+
 SIGNALS={
     'C':('🟢','CALL'),'MC':('🚀','MOMENTUM CALL'),'P':('🔴','PUT'),
     'MP':('🔻','MOMENTUM PUT'),'CMP':('⚠️','CRASH MOMENTUM'),'SCMP':('🚨','SHOCK CRASH'),
@@ -286,5 +314,4 @@ def tradingview_deliver():
     if os.getenv('TV_INFORMATION_MODE','shadow')!='live':
         return {'mode':'shadow','delivery':[]}
     return {'delivery':drain(storage(),send_telegram,prefix='tv-info:')}
-
 
