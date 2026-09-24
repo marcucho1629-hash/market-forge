@@ -326,3 +326,46 @@ def tradingview_deliver():
     if os.getenv('TV_INFORMATION_MODE','shadow')!='live':
         return {'mode':'shadow','delivery':[]}
     return {'delivery':drain(storage(),send_telegram,prefix='tv-info:')}
+
+
+@app.post('/scanner/chart-news/refresh',dependencies=[Depends(authorized)])
+def chart_news_refresh(data:dict):
+    """Fetch up to three news excerpts; does not invent scores or send trade alerts."""
+    from scanner.bigdata import refresh
+    try:
+        return refresh(storage(),data.get('ticker','SPY'),now_utc())
+    except ValueError:
+        raise HTTPException(422,'unknown ticker') from None
+    except Exception:
+        raise HTTPException(503,'News storage unavailable') from None
+
+
+@app.get('/scanner/chart-news/connections',dependencies=[Depends(authorized)])
+def chart_news_connections():
+    return {'bigdata_key_configured':bool(os.getenv('BIGDATA_API_KEY')),
+            'telegram_configured':bool(os.getenv('TELEGRAM_BOT_TOKEN') and os.getenv('TELEGRAM_CHAT_ID')),
+            'chart_secret_configured':bool(os.getenv('TRADINGVIEW_WEBHOOK_SECRET')),
+            'mode':'shadow','news_scoring':'review_required',
+            'universe_size':70,'weights':{'chart':80,'bigdata':20},
+            'delivery_verified':False}
+
+
+@app.post('/scanner/chart-news/test-telegram',dependencies=[Depends(authorized)])
+def chart_news_test_telegram(data:dict):
+    """Explicit diagnostic only, with durable at-most-once delivery attempt."""
+    import re
+    identity=data.get('test_id','')
+    if not isinstance(identity,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{8,80}',identity):
+        raise HTTPException(422,'test_id must be 8..80 alphanumeric, underscore or hyphen characters')
+    key='chart-news-test:'+identity
+    with storage().transaction() as tx:
+        previous=tx.get(key)
+        if previous: return {**previous,'duplicate':True}
+        tx.put(key,{'status':'attempting','test_id':identity})
+    try:
+        send_telegram('Market Forge 연결 테스트\n실제 매매 신호가 아닙니다.\n차트80 + Bigdata20 시스템 연결 점검 중입니다.\n테스트 ID: '+identity)
+        result={'status':'telegram_api_accepted','test_id':identity,'recipient_read_verified':False}
+    except Exception:
+        result={'status':'uncertain_or_failed','test_id':identity}
+    with storage().transaction() as tx: tx.put(key,result)
+    return result
