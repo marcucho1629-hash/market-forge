@@ -1,6 +1,6 @@
 """Bounded REST ingestion. API success never implies that news has been scored."""
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import requests
 from .chart_news import UNIVERSE
 from .news import import_documents
@@ -8,6 +8,12 @@ from .news import import_documents
 
 class BigdataError(Exception):
     pass
+
+
+def api_timestamp(raw):
+    # Official bigdata-client 2.21.0 document.py: all returned timestamps are UTC.
+    value=datetime.fromisoformat(raw.replace('Z','+00:00'))
+    return (value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value).isoformat()
 
 
 def search(ticker, now):
@@ -38,7 +44,7 @@ def search(ticker, now):
             chunks=r.get('chunks',[])
             text='\n\n'.join(c['text'] for c in chunks if isinstance(c.get('text'),str))
             documents.append({'id':r['id'],'url':r['url'],'title':r['headline'],
-                              'timestamp':r['timestamp'],'text':text or None})
+                              'timestamp':api_timestamp(r['timestamp']),'text':text or None})
         return documents
     except (ValueError,KeyError,TypeError,AttributeError):
         raise BigdataError('bigdata_invalid_response') from None
@@ -55,6 +61,16 @@ def refresh(store,ticker,now):
         tx.put(cache_key,{'status':'pending','ticker':ticker,'requested_at':now.timestamp()})
     try:
         documents=search(ticker,now)
+        # Repair only this adapter's existing offset-free receipt; retain first-seen.
+        with store.transaction() as tx:
+            for doc in documents:
+                key='quality-news-document:'+doc['id']
+                old=tx.get(key)
+                if old and old.get('status')=='timezone_unverified' and api_timestamp(old['raw_timestamp'])==doc['timestamp']:
+                    old['published_at']=doc['timestamp']
+                    old['status']='ready_for_review' if old.get('text') and datetime.fromisoformat(doc['timestamp'])<=now else 'future_publication'
+                    old['timezone_basis']='official bigdata-client 2.21.0 document.py: UTC'
+                    tx.put(key,old)
         imported=import_documents(store,documents,now) if documents else {'documents':[]}
         result={'status':'documents_received' if documents else 'no_results',
                 'authenticated':True,'ticker':ticker,'requested_at':now.timestamp(),

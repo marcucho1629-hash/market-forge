@@ -25,3 +25,13 @@ Remaining before a live test: wire actual chart features and benchmark-relative 
 The receiver validates producer/schema, completed-bar age, benchmark interval, direction and authentication, removes secrets from stored payloads, and evaluates shadow only. No Telegram is queued. Per-alert arrival ordering is not global ranking of 70 symbols.
 
 Vercel project and shared environment-variable search both found no BIGDATA variable. A server API key is required for automatic API calls (official reference: https://docs.bigdata.com/api-rest/authentication). API authentication does not itself implement the news polling/review worker. That worker, session provisioning, live deployment and Telegram receipt remain outstanding.
+
+
+## One-session runtime test (2026-09-24)
+Authenticated control enables delivery only until an explicit expiry within 24 hours. An independently verified market session is also required. Entries require chart>=60, total>=80 and no risk blocks. Separate high-momentum information may be sent without news; it is labeled as not an 80-point entry. A shared maximum of three selections per five minutes and 20-minute ticker cooldown apply.
+
+Pine remains confirmed 5-minute sampling on a 1-minute host. The webhook performs only stored-evidence evaluation and durable queueing, then attempts background Telegram delivery; the worker also drains pending messages. Messages expire after 60 seconds. The worker refreshes at most one recently observed ticker each run, at most once per ten minutes per ticker and 70 refresh attempts per ET day. Newly fetched news applies only to subsequent observations, never retroactively. This is candidate-driven, not continuous polling of 70 news feeds.
+
+Automated news review uses an exact supporting excerpt and a conservative impact/novelty/certainty/directness rubric (0..5 each, multiplied by five to produce 0..100 before the 20% weight). Neutral or unverified evidence does not create news points. These are experimental heuristic scores, not calibrated probabilities. Quote/spread and sector-money-flow verification are not implemented.
+
+Bigdata API offset-free timestamps are normalized to UTC only within the official API adapter, matching bigdata-client 2.21.0 document.py model_post_init. Imported arbitrary timestamps remain unverified. First-seen times are preserved during normalization repair.

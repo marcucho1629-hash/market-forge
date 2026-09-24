@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 from functools import lru_cache
 
 import requests
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.security import APIKeyHeader
 from openai import OpenAI
 from scanner.core import Config, ET, stamp, finite
@@ -19,14 +19,18 @@ log=logging.getLogger('market_forge')
 app=FastAPI(title='Market Forge AI')
 
 @app.post('/webhook/chart-news')
-def chart_news_webhook(data:dict):
-    secret=os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
+def chart_news_webhook(data:dict, background_tasks:BackgroundTasks):
+    secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
     if not secret or not isinstance(data.get('secret'),str) or not hmac.compare_digest(data['secret'],secret):
         raise HTTPException(401,'Unauthorized')
     from scanner.chart_news import shadow_batch,webhook_payload
     try:
         now=now_utc()
-        return shadow_batch(storage(),webhook_payload(data,now),now)
+        from scanner.chart_runtime import after_intake
+        payload=webhook_payload(data,now)
+        result=after_intake(storage(),payload,shadow_batch(storage(),payload,now),now)
+        if result['mode']=='live_test':background_tasks.add_task(drain,storage(),send_telegram,prefix='chart-news-live:')
+        return result
     except (ValueError,KeyError,TypeError,OverflowError) as exc:
         raise HTTPException(422,str(exc)) from None
 
@@ -333,7 +337,13 @@ def chart_news_refresh(data:dict):
     """Fetch up to three news excerpts; does not invent scores or send trade alerts."""
     from scanner.bigdata import refresh
     try:
-        return refresh(storage(),data.get('ticker','SPY'),now_utc())
+        ticker=data.get('ticker','SPY')
+        now=now_utc()
+        result=refresh(storage(),ticker,now)
+        if data.get('review') is True:
+            from scanner.news_review import review_latest
+            result['review']=review_latest(storage(),ticker,[r['id'] for r in result.get('documents',[])],now)
+        return result
     except ValueError:
         raise HTTPException(422,'unknown ticker') from None
     except Exception:
@@ -342,12 +352,15 @@ def chart_news_refresh(data:dict):
 
 @app.get('/scanner/chart-news/connections',dependencies=[Depends(authorized)])
 def chart_news_connections():
+    from scanner.chart_runtime import active_control
+    with storage().transaction() as tx:
+        control=active_control(tx,now_utc())
     return {'bigdata_key_configured':bool(os.getenv('BIGDATA_API_KEY')),
             'telegram_configured':bool(os.getenv('TELEGRAM_BOT_TOKEN') and os.getenv('TELEGRAM_CHAT_ID')),
-            'chart_secret_configured':bool(os.getenv('TRADINGVIEW_WEBHOOK_SECRET')),
-            'mode':'shadow','news_scoring':'review_required',
+            'chart_secret_configured':bool(os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET')),
+            'mode':'live_test' if control else 'shadow','test_expires_at':control.get('expires_at'),'news_scoring':'candidate_worker_machine_review',
             'universe_size':70,'weights':{'chart':80,'bigdata':20},
-            'delivery_verified':False}
+            'delivery_verified':False,'review_key_configured':bool(os.getenv('OPENAI_API_KEY'))}
 
 
 @app.post('/scanner/chart-news/test-telegram',dependencies=[Depends(authorized)])
@@ -369,3 +382,32 @@ def chart_news_test_telegram(data:dict):
         result={'status':'uncertain_or_failed','test_id':identity}
     with storage().transaction() as tx: tx.put(key,result)
     return result
+
+
+@app.get('/scanner/chart-news/worker',dependencies=[Depends(authorized)])
+def chart_news_worker():
+    from scanner.chart_runtime import worker
+    return worker(storage(),send_telegram,now_utc())
+
+
+@app.post('/scanner/chart-news/control',dependencies=[Depends(authorized)])
+def chart_news_control(data:dict):
+    from scanner.core import stamp,ET
+    now=now_utc()
+    if type(data.get('enabled')) is not bool:raise HTTPException(422,'enabled must be boolean')
+    try:expiry=stamp(data.get('expires_at',now.isoformat()))
+    except (ValueError,TypeError):raise HTTPException(422,'Invalid expires_at') from None
+    if data['enabled'] and not 0<(expiry-now).total_seconds()<=86400:
+        raise HTTPException(422,'Test must expire within 24 hours')
+    with storage().transaction() as tx:
+        control={'enabled':data['enabled'],'expires_at':expiry.isoformat(),'updated_at':now.isoformat()}
+        tx.put('chart-news-control',control)
+    return control
+
+
+@app.middleware('http')
+async def private_responses(request,call_next):
+    response=await call_next(request)
+    if request.url.path.startswith(('/scanner','/tradingview','/webhook')):
+        response.headers['Cache-Control']='no-store'
+    return response
