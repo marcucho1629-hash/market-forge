@@ -405,6 +405,42 @@ def chart_news_control(data:dict):
     return control
 
 
+@app.post('/webhook/scanner-v2')
+def scanner_v2_webhook(data:dict,background_tasks:BackgroundTasks):
+    secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
+    if not secret or not isinstance(data.get('secret'),str) or not hmac.compare_digest(data['secret'],secret):
+        raise HTTPException(401,'Unauthorized')
+    from scanner.live_signals import ingest,delivery
+    try:
+        now=now_utc()
+        result=ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now)
+        background_tasks.add_task(delivery,storage(),send_telegram,now)
+        return result
+    except (ValueError,KeyError,TypeError,OverflowError):
+        raise HTTPException(422,'Invalid or stale scanner observation') from None
+
+
+@app.get('/scanner/v2/worker',dependencies=[Depends(authorized)])
+def scanner_v2_worker():
+    from scanner.live_runtime import worker
+    return worker(storage(),send_telegram,now_utc())
+
+
+@app.get('/scanner/v2/status',dependencies=[Depends(authorized)])
+def scanner_v2_status():
+    from scanner.live_runtime import status
+    return status(storage(),now_utc())
+
+
+@app.post('/scanner/v2/control',dependencies=[Depends(authorized)])
+def scanner_v2_control(data:dict):
+    from scanner.live_signals import VERSION
+    if type(data.get('enabled')) is not bool:raise HTTPException(422,'enabled must be boolean')
+    control={'enabled':data['enabled'],'version':VERSION,'schedule':'every_trading_day','updated_at':now_utc().isoformat()}
+    with storage().transaction() as tx:tx.put('mf130-control',control)
+    return control
+
+
 @app.middleware('http')
 async def private_responses(request,call_next):
     response=await call_next(request)

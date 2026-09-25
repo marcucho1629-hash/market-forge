@@ -16,7 +16,7 @@ def api_timestamp(raw):
     return (value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value).isoformat()
 
 
-def search(ticker, now):
+def search(ticker, now, timeout=(5,20)):
     if ticker not in UNIVERSE:
         raise ValueError('unknown ticker')
     key=os.getenv('BIGDATA_API_KEY','')
@@ -28,7 +28,7 @@ def search(ticker, now):
         'max_chunks':3}}
     try:
         response=requests.post('https://api.bigdata.com/v1/search',
-            headers={'X-API-KEY':key,'Content-Type':'application/json'},json=body,timeout=(5,20))
+            headers={'X-API-KEY':key,'Content-Type':'application/json'},json=body,timeout=timeout)
     except requests.RequestException:
         raise BigdataError('bigdata_network_error') from None
     if response.status_code!=200:
@@ -50,7 +50,7 @@ def search(ticker, now):
         raise BigdataError('bigdata_invalid_response') from None
 
 
-def refresh(store,ticker,now):
+def refresh(store,ticker,now,timeout=None):
     if ticker not in UNIVERSE: raise ValueError('unknown ticker')
     cache_key='bigdata-refresh:'+ticker
     # Reserve before the paid call, so concurrent requests cannot fan out.
@@ -60,7 +60,7 @@ def refresh(store,ticker,now):
             return {**old,'cached':True}
         tx.put(cache_key,{'status':'pending','ticker':ticker,'requested_at':now.timestamp()})
     try:
-        documents=search(ticker,now)
+        documents=search(ticker,now,timeout=timeout) if timeout else search(ticker,now)
         # Repair only this adapter's existing offset-free receipt; retain first-seen.
         with store.transaction() as tx:
             for doc in documents:

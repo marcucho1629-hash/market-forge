@@ -64,8 +64,11 @@ def assess(tx, row, now):
     chart = sum(components.values())
     usable = []
     # Evidence is read from the authenticated server inbox, never the alert payload.
+    items=[]
     for category in ('news','catalyst'):
-        item = tx.get(f'quality-evidence:{ticker}:{direction}:{category}')
+        key=f'quality-evidence:{ticker}:{direction}:{category}'
+        items.extend(tx.get(key+':pool',[]) or [tx.get(key)])
+    for item in items:
         if not item or item.get('source') != 'Bigdata.com' or item.get('direction') != direction:
             continue
         doc = tx.get('quality-news-document:'+item['document_id'])

@@ -2,3 +2,4 @@ fastapi
 openai
 requests
 psycopg[binary]
+pandas_market_calendars==5.4.0

@@ -95,7 +95,12 @@ def review_document(store, data, now):
             if any(old[k]!=evidence[k] for k in ('event_id','score','rationale','supporting_excerpt','reviewer')):
                 raise ValueError('review already recorded; conflicting update rejected')
             return {'mode':'shadow','duplicate':True,'evidence':old,'telegram_sent':0}
-        tx.put(key,evidence)
+        pool=tx.get(key+':pool',[old] if old else [])
+        pool=[e for e in pool if e['document_id']!=doc_id and (now-stamp(e['published_at'])).total_seconds()<=10800]
+        pool.append(evidence)
+        tx.put(key+':pool',pool[-20:])
+        if not old or published>=stamp(old['published_at']):
+            tx.put(key,evidence)
         tx.event(key+':'+now.isoformat(),day,{'source':'quality_news_review','ticker':ticker,'evidence':evidence})
     return {'mode':'shadow','duplicate':False,'evidence':evidence,'telegram_sent':0}
 
