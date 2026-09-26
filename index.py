@@ -422,6 +422,11 @@ def scanner_v2_webhook(data:dict,background_tasks:BackgroundTasks):
 
 @app.get('/scanner/v2/worker',dependencies=[Depends(authorized)])
 def scanner_v2_worker():
+    from scanner.engine_relay import delivery as relay_delivery,VERSION as RELAY_VERSION
+    with storage().transaction() as tx:
+        relay_control=tx.get('mf131-control',{})
+    if relay_control.get('enabled') and relay_control.get('version')==RELAY_VERSION:
+        return {'version':RELAY_VERSION,'delivery':relay_delivery(storage(),send_telegram,now_utc()),'news_calls':0}
     from scanner.live_runtime import worker
     return worker(storage(),send_telegram,now_utc())
 
@@ -437,7 +442,10 @@ def scanner_v2_control(data:dict):
     from scanner.live_signals import VERSION
     if type(data.get('enabled')) is not bool:raise HTTPException(422,'enabled must be boolean')
     control={'enabled':data['enabled'],'version':VERSION,'schedule':'every_trading_day','updated_at':now_utc().isoformat()}
-    with storage().transaction() as tx:tx.put('mf130-control',control)
+    with storage().transaction() as tx:
+        if data['enabled'] and tx.get('mf131-control',{}).get('enabled'):
+            raise HTTPException(409,'Disable V13.31 before enabling legacy alerts')
+        tx.put('mf130-control',control)
     return control
 
 
@@ -458,12 +466,17 @@ def scanner_v3_webhook(data:dict,background_tasks:BackgroundTasks):
 
 @app.get('/scanner/v3/status',dependencies=[Depends(authorized)])
 def scanner_v3_status():
-    from scanner.engine_relay import VERSION
-    with storage().transaction() as tx:
-        return {'version':VERSION,'control':tx.get('mf131-control',{}),
-                'banks':{str(i):tx.get('mf131-bank:'+str(i)) for i in range(1,8)},
-                'default_mode':'shadow','entry_source':'chart_mc/chart_scmp',
-                'independent_momentum':False,'score_gate':False,'news_gate':False}
+    from scanner.engine_relay import status
+    return status(storage(),now_utc())
+
+
+@app.post('/scanner/v3/control',dependencies=[Depends(authorized)])
+def scanner_v3_control(data:dict):
+    from scanner.engine_relay import control
+    try:
+        return control(storage(),data.get('enabled'),now_utc())
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from None
 
 
 @app.middleware('http')

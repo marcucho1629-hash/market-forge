@@ -1,5 +1,5 @@
 """Relay chart-engine events; never synthesize an entry from a score."""
-import hashlib
+import hashlib,json
 from datetime import timedelta
 from .core import stamp, ET
 from .calendar import current_session
@@ -8,6 +8,38 @@ from .store import drain
 
 VERSION = 'MF_V13_31'
 ACTIONS = {'MC': 'LONG', 'SCMP': 'SHORT', 'CTN_UP': 'LONG', 'CTN_DOWN': 'SHORT'}
+
+def control(store, enabled, now):
+    if type(enabled) is not bool: raise ValueError('enabled must be boolean')
+    with store.transaction() as tx:
+        if enabled:
+            # Cutover only outside the session: no in-flight legacy lifecycle is dropped.
+            session, market_open = current_session(now)
+            if market_open: raise ValueError('cutover requires a closed market')
+            if tx.execute("SELECT id FROM mf_outbox WHERE status='attempting' AND id LIKE ? LIMIT 1",('mf130:%',)).fetchone():
+                raise ValueError('legacy delivery needs reconciliation')
+            old=tx.get('mf130-control',{})
+            tx.put('mf130-control',{**old,'enabled':False,'updated_at':now.isoformat()})
+            tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",('mf130:%',))
+        else:
+            tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",('mf131:%',))
+        value={'enabled':enabled,'version':VERSION,'updated_at':now.isoformat(),'schedule':'every_trading_day','policy':'chart_events_only'}
+        tx.put('mf131-control',value)
+    return value
+
+def status(store, now):
+    session, market_open=current_session(now)
+    with store.transaction() as tx:
+        cfg=tx.get('mf131-control',{})
+        banks={str(i):tx.get('mf131-bank:'+str(i)) for i in range(1,8)}
+        counts={}
+        for state,payload in tx.execute("SELECT status,payload FROM mf_outbox WHERE id LIKE ?",('mf131:%',)).fetchall():
+            if stamp(json.loads(payload)['detected_at']).astimezone(ET).date().isoformat()==session['date']:
+                counts[state]=counts.get(state,0)+1
+        return {'version':VERSION,'control':cfg,'banks':banks,'session':session,'market_open':market_open,
+                'legacy_enabled':tx.get('mf130-control',{}).get('enabled',False),'delivery_today':counts,
+                'default_mode':'shadow','entry_source':'chart_mc/chart_scmp','independent_momentum':False,
+                'score_gate':False,'news_gate':False,'batch_interval_seconds':15}
 
 def normalize(data, now):
     if data.get('source') != VERSION or data.get('schema_version') != 3:
@@ -79,6 +111,8 @@ def ingest(store, data, now):
     return {'status':'ok','mode':'live' if enabled else 'shadow','decisions':decisions}
 
 def delivery(store, send, now, clock=None):
+    with store.transaction() as tx:
+        if not tx.get('mf131-control',{}).get('enabled'): return []
     results=drain(store,send,limit=70,prefix='mf131:',clock=clock)
     with store.transaction() as tx:
         for result in results:

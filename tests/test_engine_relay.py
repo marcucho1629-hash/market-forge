@@ -51,3 +51,19 @@ class RelayTests(unittest.TestCase):
         self.now=datetime(2026,9,25,13,35,15,tzinfo=timezone.utc)
         self.runrow(observed_at=self.now.isoformat(),bar_start='2026-09-25T13:35:00+00:00',bar_end='2026-09-25T13:40:00+00:00',benchmark_start='2026-09-25T13:35:00+00:00');self.send(sent.append)
         self.assertEqual(len(sent),2)
+    def test_cutover_excludes_legacy(self):
+        from scanner.engine_relay import control,status
+        weekend=datetime(2026,9,26,12,tzinfo=timezone.utc)
+        with self.db.transaction() as tx:
+            tx.put('mf130-control',{'enabled':True,'version':'MF_V13_30'})
+            tx.enqueue('mf130:old',{'text':'old'})
+        control(self.db,True,weekend)
+        self.assertFalse(status(self.db,weekend)['legacy_enabled'])
+        with self.db.transaction() as tx:self.assertEqual(tx.execute('SELECT status FROM mf_outbox WHERE id=?',('mf130:old',)).fetchone()[0],'expired')
+    def test_no_mid_session_cutover(self):
+        from scanner.engine_relay import control
+        with self.assertRaises(ValueError):control(self.db,True,self.now)
+    def test_disable_prevents_queued_delivery(self):
+        from scanner.engine_relay import control
+        self.enable();self.runrow();control(self.db,False,self.now)
+        self.assertEqual(self.send(lambda _:self.fail()),[])
