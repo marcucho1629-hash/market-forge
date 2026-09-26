@@ -71,11 +71,12 @@ class Transaction:
                      (id,'pending',json.dumps(payload)))
 
 
-def drain(store,send,limit=5,prefix=None,now=None):
+def drain(store,send,limit=5,prefix=None,now=None,clock=None):
     """At-most-once attempt. Ambiguous Telegram timeouts require manual reconciliation.
 
     Never resend an attempted message automatically: Telegram has no idempotency key.
     """
+    clock = clock or (lambda: datetime.now(timezone.utc))
     results=[]
     for _ in range(limit):
         with store.transaction() as tx:
@@ -87,17 +88,19 @@ def drain(store,send,limit=5,prefix=None,now=None):
             id,payload=row
             decoded=json.loads(payload)
             expiry=decoded.get('expires_at')
-            if expiry and datetime.fromisoformat(expiry) <= (now or datetime.now(timezone.utc)):
+            if expiry and datetime.fromisoformat(expiry) <= (now or clock()):
                 tx.execute("UPDATE mf_outbox SET status='expired' WHERE id=?",(id,))
                 results.append({'id':id,'status':'expired'})
                 continue
             tx.execute("UPDATE mf_outbox SET status='attempting' WHERE id=?",(id,))
+        send_started_at = clock().isoformat()
         try:
             send(json.loads(payload)['text'])
             status='sent'
         except Exception:
             status='uncertain_or_failed'
+        send_completed_at = clock().isoformat()
         with store.transaction() as tx:
             tx.execute('UPDATE mf_outbox SET status=? WHERE id=?',(status,id))
-        results.append({'id':id,'status':status})
+        results.append({'id':id,'status':status,'send_started_at':send_started_at,'send_completed_at':send_completed_at})
     return results

@@ -441,6 +441,31 @@ def scanner_v2_control(data:dict):
     return control
 
 
+@app.post('/webhook/scanner-v3')
+def scanner_v3_webhook(data:dict,background_tasks:BackgroundTasks):
+    secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
+    if not secret or not isinstance(data.get('secret'),str) or not hmac.compare_digest(data['secret'],secret):
+        raise HTTPException(401,'Unauthorized')
+    from scanner.engine_relay import ingest,delivery
+    try:
+        now=now_utc()
+        result=ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now)
+        background_tasks.add_task(delivery,storage(),send_telegram,now)
+        return result
+    except (ValueError,KeyError,TypeError,OverflowError):
+        raise HTTPException(422,'Invalid or stale chart-engine observation') from None
+
+
+@app.get('/scanner/v3/status',dependencies=[Depends(authorized)])
+def scanner_v3_status():
+    from scanner.engine_relay import VERSION
+    with storage().transaction() as tx:
+        return {'version':VERSION,'control':tx.get('mf131-control',{}),
+                'banks':{str(i):tx.get('mf131-bank:'+str(i)) for i in range(1,8)},
+                'default_mode':'shadow','entry_source':'chart_mc/chart_scmp',
+                'independent_momentum':False,'score_gate':False,'news_gate':False}
+
+
 @app.middleware('http')
 async def private_responses(request,call_next):
     response=await call_next(request)
