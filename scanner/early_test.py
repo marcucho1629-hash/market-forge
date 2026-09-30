@@ -31,7 +31,7 @@ def control(store,enabled,test_date,now):
                 old=tx.get(prefix+'-control',{})
                 tx.put(prefix+'-control',{**old,'enabled':False,'updated_at':now.isoformat()})
                 tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",(prefix+':%',))
-        if not enabled:tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE 'mf132:%'")
+        if not enabled:tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",('mf132:%',))
         value={'enabled':enabled,'version':VERSION,'test_date':test_date,'symbols':sum(BANKS.values(),[]),'updated_at':now.isoformat(),'restore_legacy':False}
         tx.put('mf132-control',value)
     return value
@@ -119,7 +119,7 @@ def ingest(store,data,now):
 def delivery(store,send,now,clock=None):
     with store.transaction() as tx:
         if not active(tx.get('mf132-control',{}),now):
-            tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE 'mf132:%'")
+            tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",('mf132:%',))
             return []
     results=drain(store,send,limit=40,prefix='mf132:',clock=clock)
     with store.transaction() as tx:

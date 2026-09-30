@@ -53,3 +53,15 @@ class EarlyIntegration(unittest.TestCase):
   with self.db.transaction() as tx:self.assertFalse(tx.get('mf131-control')['enabled'])
  def test_weekend_test_date_rejected(self):
   with self.assertRaises(ValueError):control(self.db,True,'2026-10-03',datetime(2026,9,29,23,tzinfo=timezone.utc))
+ def test_postgres_parameter_parsing_for_expiry_paths(self):
+  from unittest.mock import patch
+  from psycopg._queries import _split_query
+  from scanner.store import Transaction
+  execute=Transaction.execute
+  def checked(tx,sql,args=()):
+   _split_query(sql.replace('?', '%s').encode())
+   return execute(tx,sql,args)
+  with patch.object(Transaction,'execute',checked):
+   self.runrow();self.now=self.now.replace(hour=21)
+   self.assertEqual(self.send(),[])
+   control(self.db,False,'2026-09-25',self.now)
