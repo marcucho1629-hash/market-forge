@@ -422,6 +422,11 @@ def scanner_v2_webhook(data:dict,background_tasks:BackgroundTasks):
 
 @app.get('/scanner/v2/worker',dependencies=[Depends(authorized)])
 def scanner_v2_worker():
+    from scanner.early_test import delivery as early_delivery, VERSION as EARLY_VERSION
+    with storage().transaction() as tx:
+        early_control=tx.get('mf132-control',{})
+    if early_control.get('enabled'):
+        return {'version':EARLY_VERSION,'delivery':early_delivery(storage(),send_telegram,now_utc()),'news_calls':0}
     from scanner.engine_relay import delivery as relay_delivery,VERSION as RELAY_VERSION
     with storage().transaction() as tx:
         relay_control=tx.get('mf131-control',{})
@@ -443,6 +448,8 @@ def scanner_v2_control(data:dict):
     if type(data.get('enabled')) is not bool:raise HTTPException(422,'enabled must be boolean')
     control={'enabled':data['enabled'],'version':VERSION,'schedule':'every_trading_day','updated_at':now_utc().isoformat()}
     with storage().transaction() as tx:
+        if data['enabled'] and tx.get('mf132-control',{}).get('enabled'):
+            raise HTTPException(409,'Disable EARLY test before enabling legacy alerts')
         if data['enabled'] and tx.get('mf131-control',{}).get('enabled'):
             raise HTTPException(409,'Disable V13.31 before enabling legacy alerts')
         tx.put('mf130-control',control)
@@ -454,7 +461,10 @@ def scanner_v3_webhook(data:dict,background_tasks:BackgroundTasks):
     secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
     if not secret or not isinstance(data.get('secret'),str) or not hmac.compare_digest(data['secret'],secret):
         raise HTTPException(401,'Unauthorized')
-    from scanner.engine_relay import ingest,delivery
+    if data.get('source')=='MF_V13_32':
+        from scanner.early_test import ingest,delivery
+    else:
+        from scanner.engine_relay import ingest,delivery
     try:
         now=now_utc()
         result=ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now)
@@ -485,3 +495,15 @@ async def private_responses(request,call_next):
     if request.url.path.startswith(('/scanner','/tradingview','/webhook')):
         response.headers['Cache-Control']='no-store'
     return response
+
+
+@app.get('/scanner/v4/status',dependencies=[Depends(authorized)])
+def scanner_v4_status():
+    from scanner.early_test import status
+    return status(storage(),now_utc())
+
+@app.post('/scanner/v4/control',dependencies=[Depends(authorized)])
+def scanner_v4_control(data:dict):
+    from scanner.early_test import control
+    try:return control(storage(),data.get('enabled'),data.get('test_date',''),now_utc())
+    except (ValueError,TypeError):raise HTTPException(422,'Invalid test control or unresolved delivery') from None

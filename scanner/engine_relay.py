@@ -13,6 +13,8 @@ def control(store, enabled, now):
     if type(enabled) is not bool: raise ValueError('enabled must be boolean')
     with store.transaction() as tx:
         if enabled:
+            if tx.get("mf132-control",{}).get("enabled"):
+                raise ValueError("Disable EARLY test before enabling V13.31")
             # Cutover only outside the session: no in-flight legacy lifecycle is dropped.
             session, market_open = current_session(now)
             if market_open: raise ValueError('cutover requires a closed market')
