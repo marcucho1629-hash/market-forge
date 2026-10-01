@@ -422,6 +422,8 @@ def scanner_v2_webhook(data:dict,background_tasks:BackgroundTasks):
 
 @app.get('/scanner/v2/worker',dependencies=[Depends(authorized)])
 def scanner_v2_worker():
+    from scanner.fast_path import sweep
+    sweep(storage(),now_utc())
     from scanner.early_test import delivery as early_delivery, VERSION as EARLY_VERSION
     with storage().transaction() as tx:
         early_control=tx.get('mf132-control',{})
@@ -461,6 +463,11 @@ def scanner_v3_webhook(data:dict,background_tasks:BackgroundTasks):
     secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
     if not secret or not isinstance(data.get('secret'),str) or not hmac.compare_digest(data['secret'],secret):
         raise HTTPException(401,'Unauthorized')
+    if data.get('source')=='MF_V13_33':
+        from scanner.fast_path import ingest
+        try:return ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now_utc())
+        except (ValueError,KeyError,TypeError,OverflowError):
+            raise HTTPException(422,'Invalid fast-path observation') from None
     if data.get('source')=='MF_V13_32':
         from scanner.early_test import ingest,delivery
     else:
