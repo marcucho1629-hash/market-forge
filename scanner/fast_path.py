@@ -1,4 +1,4 @@
-"""V13.33 shadow-first early path. Never modifies the chart engine.
+"""V13.33 isolated early path. Never modifies the chart engine.
 
 State belongs to a ticker AND source bar. Missing observations expire candidates;
 only observed failure cancels them. Parameters are research defaults, not fitted.
@@ -107,13 +107,17 @@ def normalize_row(raw,kind,bank,now):
     return r
 
 def ingest(store,data,now):
-    """Audit-only until a separately approved live cutover. No Telegram side effects."""
+    """Isolate shadow state from the explicitly enabled live Telegram path."""
     if data.get('source')!=VERSION or data.get('schema_version')!=5:raise ValueError('wrong fast-path version')
     bank=data.get('bank')
     if type(bank) is not int or bank not in BANKS:raise ValueError('wrong bank')
     if not isinstance(data.get('observations'),list) or len(data['observations'])>20:raise ValueError('oversized batch')
     day=now.astimezone(ET).date().isoformat();decisions=[]
     with store.transaction() as tx:
+        from .fast_delivery import active, entry, reconcile
+        cfg=tx.get('mf133-control',{})
+        live=active(cfg,now)
+        ns='mf133-live' if live else 'mf133'
         # Clock-based expiry runs even when no further packet arrives for a ticker.
         sweep_tx(tx,now)
         for raw in data['observations']:
@@ -121,30 +125,41 @@ def ingest(store,data,now):
             try:r=normalize_row(raw,kind,bank,now)
             except (ValueError,TypeError,KeyError,OverflowError):
                 decisions.append(dict(ticker=raw.get('ticker') if isinstance(raw,dict) else None,event='REJECTED_ROW'));continue
-            key=f'mf133-state:{day}:{r["ticker"]}';prior=tx.get(key,{})
-            old_seen=tx.get(f'mf133-terminal:{day}:{r["ticker"]}:{identity(r)}')
+            key=f'{ns}-state:{day}:{r["ticker"]}';prior=tx.get(key,{})
+            if prior.get('message_id') and prior.get('phase') in ('cancelled','expired'):
+                parent=tx.execute('SELECT status FROM mf_outbox WHERE id=?',(prior['message_id'],)).fetchone()
+                if parent and parent[0]=='attempting':
+                    decisions.append(dict(ticker=r['ticker'],event='WAIT_DELIVERY'));continue
+            old_seen=tx.get(f'{ns}-terminal:{day}:{r["ticker"]}:{identity(r)}')
             if old_seen and prior.get('identity')!=identity(r):
                 decisions.append(dict(ticker=r['ticker'],event='TERMINAL_BAR'));continue
-            state,event=step(prior,r,kind,now);tx.put(key,state)
+            state,event=step(prior,r,kind,now)
+            if live and event=='SEND' and active(cfg,now,entries=True):entry(tx,state,r,now)
+            tx.put(key,state)
             if state.get('phase') in ('cancelled','expired','confirmed'):
-                tx.put(f'mf133-terminal:{day}:{r["ticker"]}:{state["identity"]}',state['phase'])
+                tx.put(f'{ns}-terminal:{day}:{r["ticker"]}:{state["identity"]}',state['phase'])
             seenkey=f'mf133-seen:{day}:{r["ticker"]}:{kind}';previous=tx.get(seenkey)
             gap=(stamp(r['observed_at'])-stamp(previous)).total_seconds() if previous else None
             if previous is None or stamp(r['observed_at'])>stamp(previous):tx.put(seenkey,r['observed_at'])
             decisions.append(dict(ticker=r['ticker'],event=event,state=state,observation=r,gates={str(s):gates(r,s) for s in (1,-1)},observed_gap_seconds=gap))
+        if live:reconcile(tx,now)
+        tx.put('mf133-bank:'+str(bank),dict(received_at=now.isoformat(),live=live,execution_gap_ms=data.get('execution_gap_ms'),coverage=data.get('coverage',[])))
         digest=hashlib.sha256(str(data).encode()).hexdigest()
         tx.event('mf133:'+digest,day,dict(source='mf133',received_at=now.isoformat(),bank=bank,decisions=decisions,coverage=data.get('coverage',[]),emitted_at=data.get('emitted_at'),execution_gap_ms=data.get('execution_gap_ms')))
-    return dict(mode='shadow',decisions=decisions)
+    return dict(mode='live_test' if live else 'shadow',decisions=decisions)
 
 def sweep_tx(tx,now):
     day=now.astimezone(ET).date().isoformat();events=[]
-    for ticker in sum(BANKS.values(),[]):
-        key=f'mf133-state:{day}:{ticker}';s=tx.get(key,{})
-        nxt,event=expire(s,now)
-        if event:
-            tx.put(key,nxt);tx.put(f'mf133-terminal:{day}:{ticker}:{nxt["identity"]}','expired')
-            row=dict(source='mf133_expiry',ticker=ticker,state=nxt,at=now.isoformat())
-            tx.event('mf133-expiry:'+nxt['identity'],day,row);events.append(row)
+    for ns in ('mf133','mf133-live'):
+        for ticker in sum(BANKS.values(),[]):
+            key=f'{ns}-state:{day}:{ticker}';s=tx.get(key,{})
+            nxt,event=expire(s,now)
+            if event:
+                tx.put(key,nxt);tx.put(f'{ns}-terminal:{day}:{ticker}:{nxt["identity"]}','expired')
+                row=dict(source='mf133_expiry',ticker=ticker,state=nxt,at=now.isoformat())
+                tx.event(ns+'-expiry:'+nxt['identity'],day,row);events.append(row)
+    from .fast_delivery import reconcile
+    reconcile(tx,now)
     return events
 
 def sweep(store,now):

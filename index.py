@@ -376,7 +376,7 @@ def chart_news_test_telegram(data:dict):
         if previous: return {**previous,'duplicate':True}
         tx.put(key,{'status':'attempting','test_id':identity})
     try:
-        send_telegram('Market Forge 연결 테스트\n실제 매매 신호가 아닙니다.\n차트80 + Bigdata20 시스템 연결 점검 중입니다.\n테스트 ID: '+identity)
+        send_telegram('Market Forge 연결 테스트\n실제 매매 신호가 아닙니다.\nTelegram 연결 점검 중입니다.\n테스트 ID: '+identity)
         result={'status':'telegram_api_accepted','test_id':identity,'recipient_read_verified':False}
     except Exception:
         result={'status':'uncertain_or_failed','test_id':identity}
@@ -424,6 +424,10 @@ def scanner_v2_webhook(data:dict,background_tasks:BackgroundTasks):
 def scanner_v2_worker():
     from scanner.fast_path import sweep
     sweep(storage(),now_utc())
+    from scanner.fast_delivery import delivery as fast_delivery
+    with storage().transaction() as tx:fast_cfg=tx.get('mf133-control',{})
+    if fast_cfg.get('enabled'):
+        return {'version':'MF_V13_33','delivery':fast_delivery(storage(),send_telegram,now_utc()),'news_calls':0}
     from scanner.early_test import delivery as early_delivery, VERSION as EARLY_VERSION
     with storage().transaction() as tx:
         early_control=tx.get('mf132-control',{})
@@ -446,6 +450,9 @@ def scanner_v2_status():
 
 @app.post('/scanner/v2/control',dependencies=[Depends(authorized)])
 def scanner_v2_control(data:dict):
+    with storage().transaction() as tx:
+        if data.get('enabled') and tx.get('mf133-control',{}).get('enabled'):
+            raise HTTPException(409,'Disable V13.33 before enabling legacy alerts')
     from scanner.live_signals import VERSION
     if type(data.get('enabled')) is not bool:raise HTTPException(422,'enabled must be boolean')
     control={'enabled':data['enabled'],'version':VERSION,'schedule':'every_trading_day','updated_at':now_utc().isoformat()}
@@ -465,7 +472,12 @@ def scanner_v3_webhook(data:dict,background_tasks:BackgroundTasks):
         raise HTTPException(401,'Unauthorized')
     if data.get('source')=='MF_V13_33':
         from scanner.fast_path import ingest
-        try:return ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now_utc())
+        from scanner.fast_delivery import delivery
+        try:
+            now=now_utc()
+            result=ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now)
+            background_tasks.add_task(delivery,storage(),send_telegram,now)
+            return result
         except (ValueError,KeyError,TypeError,OverflowError):
             raise HTTPException(422,'Invalid fast-path observation') from None
     if data.get('source')=='MF_V13_32':
@@ -489,6 +501,9 @@ def scanner_v3_status():
 
 @app.post('/scanner/v3/control',dependencies=[Depends(authorized)])
 def scanner_v3_control(data:dict):
+    with storage().transaction() as tx:
+        if data.get('enabled') and tx.get('mf133-control',{}).get('enabled'):
+            raise HTTPException(409,'Disable V13.33 before enabling legacy alerts')
     from scanner.engine_relay import control
     try:
         return control(storage(),data.get('enabled'),now_utc())
@@ -511,6 +526,21 @@ def scanner_v4_status():
 
 @app.post('/scanner/v4/control',dependencies=[Depends(authorized)])
 def scanner_v4_control(data:dict):
+    with storage().transaction() as tx:
+        if data.get('enabled') and tx.get('mf133-control',{}).get('enabled'):
+            raise HTTPException(409,'Disable V13.33 before enabling legacy alerts')
     from scanner.early_test import control
     try:return control(storage(),data.get('enabled'),data.get('test_date',''),now_utc())
     except (ValueError,TypeError):raise HTTPException(422,'Invalid test control or unresolved delivery') from None
+
+
+@app.get('/scanner/v5/status',dependencies=[Depends(authorized)])
+def scanner_v5_status():
+    from scanner.fast_delivery import status
+    return status(storage(),now_utc())
+
+@app.post('/scanner/v5/control',dependencies=[Depends(authorized)])
+def scanner_v5_control(data:dict):
+    from scanner.fast_delivery import control
+    try:return control(storage(),data.get('enabled'),now_utc())
+    except ValueError as exc:raise HTTPException(422,str(exc)) from None

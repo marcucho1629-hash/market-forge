@@ -1,7 +1,7 @@
 //@version=6
-indicator("Market Forge V13.33 FAST PATH 20 SHADOW", overlay=false, dynamic_requests=true)
+indicator("Market Forge V13.33 FAST PATH 20 DAILY", overlay=false, dynamic_requests=true)
 plot(0, display=display.none, editable=false)
-// V13.16 chart engine preserved. Additional measurements feed a separate shadow fast path.
+// V13.16 chart engine preserved. Additional measurements feed a separate fast path.
 enableAlerts = input.bool(false, "Enable EARLY TEST webhook", group="Controls")
 bank = input.int(1, "TEST bank (1 or 2)", minval=1, maxval=2, group="Universe")
 webhookSecret = input.string("", "Webhook secret", group="Controls")
@@ -2051,9 +2051,8 @@ varip array<string> labels = array.new_string(10, "—")
 weekday = dayofweek(timenow,"America/New_York") >= dayofweek.monday and dayofweek(timenow,"America/New_York") <= dayofweek.friday
 sessionOpen = timestamp("America/New_York",year(timenow,"America/New_York"),month(timenow,"America/New_York"),dayofmonth(timenow,"America/New_York"),9,30)
 sessionClose = sessionOpen + 390*60000
-// Blank by default: activation date must be explicitly chosen for a future test.
-testDay = input.string("", "Test date (New York)", group="Controls")
-window = str.format_time(timenow,"yyyy-MM-dd","America/New_York") == testDay and weekday and timenow >= sessionOpen and timenow <= sessionClose + 60000
+// Daily schedule is additionally gated by the exchange calendar on the server.
+window = weekday and timenow >= sessionOpen and timenow <= sessionClose + 60000
 if barstate.isrealtime and window
     executionGap = na(lastExecution) ? 0 : timenow-lastExecution
     lastExecution := timenow
@@ -2096,5 +2095,5 @@ if barstate.islast and showTable
     table.cell(dashboard,1,11,str.tostring(pulseCount)+" / "+str.tostring(closedCount),text_color=color.black)
     table.cell(dashboard,0,12,"Last source rows / time",text_color=color.black)
     table.cell(dashboard,1,12,str.tostring(lastRows)+" / "+(na(lastAt) ? "Waiting for session" : str.format_time(lastAt,"HH:mm:ss","America/Denver")),text_color=color.black)
-    table.cell(dashboard,0,13,"FAST PATH 20 SHADOW",text_color=color.black)
-    table.cell(dashboard,1,13,"SHADOW · PREP / FAST",text_color=color.black)
+    table.cell(dashboard,0,13,"FAST PATH 20 DAILY",text_color=color.black)
+    table.cell(dashboard,1,13,"DAILY · PREP / FAST",text_color=color.black)
