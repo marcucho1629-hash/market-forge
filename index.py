@@ -422,6 +422,10 @@ def scanner_v2_webhook(data:dict,background_tasks:BackgroundTasks):
 
 @app.get('/scanner/v2/worker',dependencies=[Depends(authorized)])
 def scanner_v2_worker():
+    from scanner.simple.runtime import delivery as simple_delivery
+    with storage().transaction() as tx:simple_cfg=tx.get("mf135-control",{})
+    if simple_cfg.get("enabled"):
+        return {"version":"MF_V13_35","delivery":simple_delivery(storage(),send_telegram,now_utc()),"news_calls":0}
     from scanner.research.runtime import delivery as research_delivery
     with storage().transaction() as tx:research_cfg=tx.get('mf134-control',{})
     if research_cfg.get('enabled'):
@@ -571,5 +575,31 @@ def scanner_v134_status():
 @app.post('/scanner/v134/control',dependencies=[Depends(authorized)])
 def scanner_v134_control(data:dict):
     from scanner.research.runtime import control
+    try:return control(storage(),data.get('enabled'),now_utc())
+    except ValueError as exc:raise HTTPException(422,str(exc)) from None
+
+
+@app.post('/webhook/scanner-v135')
+def scanner_v135_webhook(data:dict,background_tasks:BackgroundTasks):
+    secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
+    if not secret or not isinstance(data.get('secret'),str) or not hmac.compare_digest(data['secret'],secret):
+        raise HTTPException(401,'Unauthorized')
+    from scanner.simple.runtime import ingest,delivery
+    try:
+        now=now_utc()
+        result=ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now)
+        background_tasks.add_task(delivery,storage(),send_telegram,now)
+        return result
+    except (ValueError,KeyError,TypeError,OverflowError):
+        raise HTTPException(422,'Invalid closed-bar observation') from None
+
+@app.get('/scanner/v135/status',dependencies=[Depends(authorized)])
+def scanner_v135_status():
+    from scanner.simple.runtime import status
+    return status(storage(),now_utc())
+
+@app.post('/scanner/v135/control',dependencies=[Depends(authorized)])
+def scanner_v135_control(data:dict):
+    from scanner.simple.runtime import control
     try:return control(storage(),data.get('enabled'),now_utc())
     except ValueError as exc:raise HTTPException(422,str(exc)) from None
