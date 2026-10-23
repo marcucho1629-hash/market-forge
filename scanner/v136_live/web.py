@@ -29,8 +29,10 @@ def install(app,storage,send):
 <h1>새 연구 엔진 장중 테스트</h1><p>확정 1분봉 · 20종목 · 기존 엔진과 별도 기록 · 주문 없음</p>
 <form method="post" action="/research-v136-live/control">
 <label>기존 웹훅 키 <input name="secret" type="password" required autocomplete="off"></label>
-<select name="action"><option value="status">수신 상태 확인</option value="enable">7일 테스트 활성화</option value="disable">테스트 중지</option value="deliver">대기 메시지 전달</option></select>
-<button>실행</button></form>'''
+<button name="action" value="status">수신 상태 확인</button>
+<button name="action" value="enable">7일 테스트 활성화</button>
+<button name="action" value="disable">테스트 중지</button>
+<button name="action" value="deliver">대기 메시지 전달</button></form>'''
 
     @app.post('/research-v136-live/control')
     async def panel_control(request:Request):
