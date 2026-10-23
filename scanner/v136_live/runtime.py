@@ -31,9 +31,13 @@ def ingest(store, data, now, calendar=schedule):
     if not isinstance(rows,list) or len(rows)>50: raise ValueError('invalid bars')
     day = now.astimezone(ET).date().isoformat()
     session = calendar(day)
-    if not session['is_open']: return {'accepted':0, 'reason':'market_closed'}
+    if not session['is_open']:
+        with store.transaction() as tx: tx.put(PREFIX+'bank:'+str(data['bank']),{'received_at':now.isoformat(),'day':day,'mode':'closed_heartbeat'})
+        return {'accepted':0, 'reason':'market_closed'}
     opened, closed = datetime.fromisoformat(session['open']),datetime.fromisoformat(session['close'])
-    if not opened <= now <= closed+timedelta(minutes=2): return {'accepted':0,'reason':'outside_session'}
+    if not opened <= now <= closed+timedelta(minutes=2):
+        with store.transaction() as tx: tx.put(PREFIX+'bank:'+str(data['bank']),{'received_at':now.isoformat(),'day':day,'mode':'outside_session_heartbeat','session_open':session['open']})
+        return {'accepted':0,'reason':'outside_session'}
     parsed = {}
     for r in rows:
         if not isinstance(r,list) or len(r)!=7 or r[0] not in BANKS[data['bank']]: raise ValueError('wrong bar shape or bank')
