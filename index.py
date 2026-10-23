@@ -603,3 +603,8 @@ def scanner_v135_control(data:dict):
     from scanner.simple.runtime import control
     try:return control(storage(),data.get('enabled'),now_utc())
     except ValueError as exc:raise HTTPException(422,str(exc)) from None
+
+
+# Isolated paper-research path; existing engines remain unchanged.
+from scanner.v136_live.web import install as install_v136_research
+install_v136_research(app, storage, send_telegram)
