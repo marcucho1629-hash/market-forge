@@ -1,5 +1,7 @@
 import hmac
 import os
+import html
+import json
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
 from fastapi import Request, HTTPException, BackgroundTasks
@@ -34,7 +36,7 @@ def install(app,storage,send):
 <button name="action" value="disable">테스트 중지</button>
 <button name="action" value="deliver">대기 메시지 전달</button></form>'''
 
-    @app.post('/research-v136-live/control')
+    @app.post('/research-v136-live/control',response_class=HTMLResponse)
     async def panel_control(request:Request):
         body=await request.body()
         if len(body)>1024: raise HTTPException(400,'Request too large')
@@ -44,7 +46,8 @@ def install(app,storage,send):
         action=fields.get('action',['status'])[0]
         if action in ('enable','disable'):
             cfg=runtime.control(storage(),action=='enable',now)
-            return {'control':cfg,'delivery':runtime.delivery(storage(),send,now)}
-        if action=='deliver': return {'delivery':runtime.delivery(storage(),send,now)}
-        if action!='status': raise HTTPException(400,'Unknown action')
-        return runtime.status(storage(),now)
+            result={'control':cfg,'delivery':runtime.delivery(storage(),send,now)}
+        elif action=='deliver': result={'delivery':runtime.delivery(storage(),send,now)}
+        elif action=='status': result=runtime.status(storage(),now)
+        else: raise HTTPException(400,'Unknown action')
+        return '<!doctype html><meta charset="utf-8"><h1>Research status</h1><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre><a href="/research-v136-live">Back</a>'
