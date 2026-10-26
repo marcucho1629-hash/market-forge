@@ -608,3 +608,8 @@ def scanner_v135_control(data:dict):
 # Isolated paper-research path; existing engines remain unchanged.
 from scanner.v136_live.web import install as install_v136_research
 install_v136_research(app, storage, send_telegram)
+
+
+# Swing comparison notifications are isolated from intraday paths.
+from scanner.swing_compare import install as install_swing_compare
+install_swing_compare(app, storage, send_telegram)
