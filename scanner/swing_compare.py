@@ -3,10 +3,14 @@ import hashlib
 import hmac
 import math
 import os
+import html
+import json
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from urllib.parse import parse_qs
 from scanner.store import drain
 
 TICKERS = set('SPY QQQ NVDA TSLA AVGO AMD META AAPL MSFT AMZN PLTR PANW SNDK GOOG RDDT HOOD COIN JPM AXP V'.split())
@@ -63,11 +67,37 @@ def ingest(store,data,now):
     return {'status':'queued','event_id':key}
 
 def install(app,storage,send):
+    def authenticate(value):
+        secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
+        if not secret or not isinstance(value,str) or not hmac.compare_digest(value,secret):
+            raise HTTPException(401,'Unauthorized')
+
+    @app.get('/swing-compare',response_class=HTMLResponse)
+    def panel():
+        return '''<!doctype html><meta charset="utf-8"><h1>SWING TEST 연결</h1>
+<p>1시간봉 비교용 모의 기록 · 주문 없음</p>
+<form method="post" action="/swing-compare/control"><label>웹훅 키 <input type="password" name="secret" autocomplete="off" required></label>
+<button name="action" value="status">상태 확인</button><button name="action" value="test">Telegram 연결 테스트</button></form>'''
+
+    @app.post('/swing-compare/control',response_class=HTMLResponse)
+    async def control(request:Request):
+        raw=await request.body()
+        if len(raw)>1024:raise HTTPException(400,'Too large')
+        fields=parse_qs(raw.decode());authenticate(fields.get('secret',[''])[0])
+        now=datetime.now(timezone.utc);store=storage()
+        if fields.get('action',[''])[0]=='test':
+            key=PREFIX+'connect:'+now.date().isoformat()
+            with store.transaction() as tx:
+                tx.enqueue(key,{'text':'SWING TEST 연결 테스트\n실제 매매 신호가 아닙니다.\n1시간봉 스윙 비교 알림 전용\n테스트 ID: swing-v17-'+now.date().isoformat(),'expires_at':(now+timedelta(seconds=180)).isoformat()})
+            result={'delivery':drain(store,send,prefix=PREFIX,limit=12)}
+        else:
+            with store.transaction() as tx:
+                result={'latest':tx.get(PREFIX+'latest'), 'outbox':tx.execute("SELECT status,COUNT(*) FROM mf_outbox WHERE id LIKE ? GROUP BY status",(PREFIX+'%',)).fetchall()}
+        return '<!doctype html><meta charset="utf-8"><h1>SWING TEST 결과</h1><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre>'
+
     @app.post('/webhook/swing-compare-v1')
     def intake(data:dict,background_tasks:BackgroundTasks):
-        secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
-        if not secret or not isinstance(data.get('secret'),str) or not hmac.compare_digest(data['secret'],secret):
-            raise HTTPException(401,'Unauthorized')
+        authenticate(data.get('secret'))
         try: result=ingest(storage(),data,datetime.now(timezone.utc))
         except (ValueError,TypeError,OverflowError): raise HTTPException(422,'Invalid swing comparison event') from None
         background_tasks.add_task(drain,storage(),send,limit=12,prefix=PREFIX)
