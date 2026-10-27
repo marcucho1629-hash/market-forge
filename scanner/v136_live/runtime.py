@@ -2,12 +2,13 @@
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from .engine import Bar, Engine, Config, SYMBOLS, ET
+from .engine import Bar, Engine, Config, SYMBOLS, ET, VERSION as ENGINE_VERSION
 from ..calendar import schedule
 from ..store import drain
 
 VERSION = 'MF_V136_RESEARCH_LIVE_1'
-PREFIX = 'research136live:'
+PREFIX = 'research137aligned:'
+CONTROL_KEY = 'research136live:control'  # Keep the existing explicit activation/expiry.
 BANKS = {1: SYMBOLS[:10], 2: SYMBOLS[10:]}
 DENVER = ZoneInfo('America/Denver')
 
@@ -16,7 +17,7 @@ def dt(ms):
     return datetime.fromtimestamp(ms / 1000, timezone.utc)
 
 def enabled(tx, now):
-    c = tx.get(PREFIX+'control', {})
+    c = tx.get(CONTROL_KEY, {})
     return c.get('enabled') is True and now < datetime.fromisoformat(c['expires_at'])
 
 def queue(tx, identity, text, now):
@@ -84,14 +85,15 @@ def ingest(store, data, now, calendar=schedule):
                     event=asdict(e);event['time']=e.time.isoformat()
                     eid=f'{PREFIX}{day}:{symbol}:{e.episode}:{e.action}:{r[1]}'
                     fresh=0 <= (now-e.time).total_seconds() <= 90
-                    event.update(source=VERSION,feed='BATS:'+symbol,received_at=now.isoformat(),replay_only=not fresh)
+                    event.update(source=VERSION,engine=ENGINE_VERSION,feed='BATS:'+symbol,received_at=now.isoformat(),replay_only=not fresh)
                     tx.event(eid,day,event)
                     if active and fresh and not state.get('halted'):
                         # Never announce exits/continuations for an entry that was not queued live.
                         if e.action in ('MC','SCMP'): state['sent_entry']=e.episode
                         entry_sent=e.action in ('MC','SCMP') or tx.execute("SELECT id FROM mf_outbox WHERE status='sent' AND id LIKE ? LIMIT 1",(f'{PREFIX}{day}:{symbol}:{e.episode}:' + ('MC' if e.side==1 else 'SCMP') + ':%',)).fetchone()
                         if state.get('sent_entry')==e.episode and entry_sent:
-                            text=(f'NEW TEST {symbol} {e.action}\n${e.price:.2f} · 확정 {e.timeframe}분봉 · BATS\n'
+                            detail = '1·2·3분 방향 일치 · 3분봉 확정' if e.action in ('MC','SCMP') else f'{e.timeframe}분봉 종료/추세 관리'
+                            text=(f'DAY TEST {symbol} {e.action}\n${e.price:.2f} · {detail} · BATS\n'
                                   f'봉 마감 {e.time.astimezone(DENVER):%Y-%m-%d %H:%M:%S} 덴버\n'
                                   f'연구용 신호 · 주문 아님\nID {day}-{symbol}-{e.episode}')
                             queue(tx,eid,text,now)
@@ -115,10 +117,10 @@ def control(store,on,now):
     if type(on) is not bool: raise ValueError('boolean required')
     with store.transaction() as tx:
         cfg={'enabled':on,'expires_at':(now+timedelta(days=7)).isoformat(),'updated_at':now.isoformat(),'source':VERSION}
-        tx.put(PREFIX+'control',cfg)
+        tx.put(CONTROL_KEY,cfg)
         if on:
             queue(tx,PREFIX+'setup:'+now.isoformat(),
-                  'NEW TEST 새 연구 엔진 수신 경로 활성화\n20종목 · 10+10 뱅크 · 확정 1분봉 입력\n실제 데이터 수신은 TradingView 알림 시작 후 확인됩니다.\n7일 테스트 · 주문 없음',now)
+                  'DAY TEST 수신 경로 활성화\n20종목 · 1·2·3분 방향 일치 후 3분봉 마감 진입\n종료/보호 신호 별도 · 7일 테스트 · 주문 없음',now)
         else: tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",(PREFIX+'%',))
         return cfg
 
@@ -129,6 +131,7 @@ def status(store,now):
         for symbol in SYMBOLS:
             s=tx.get(PREFIX+day+':'+symbol,{})
             states[symbol]={k:v for k,v in s.items() if k!='bars'} | {'bar_count':len(s.get('bars',[]))}
-        return {'source':VERSION,'control':tx.get(PREFIX+'control',{}),
+        outbox=tx.execute('SELECT status,COUNT(*) FROM mf_outbox WHERE id LIKE ? GROUP BY status',(PREFIX+'%',)).fetchall()
+        return {'source':VERSION,'engine':ENGINE_VERSION,'control':tx.get(CONTROL_KEY,{}),'outbox':dict(outbox),
                 'banks':{i:tx.get(PREFIX+'bank:'+str(i),{}) for i in BANKS},'symbols':states,
-                'events':[e for e in tx.events(day) if e.get('source')==VERSION]}
+                'events':[e for e in tx.events(day) if e.get('engine')==ENGINE_VERSION]}
