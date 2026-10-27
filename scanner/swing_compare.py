@@ -13,7 +13,8 @@ from fastapi.responses import HTMLResponse
 from urllib.parse import parse_qs
 from scanner.store import drain
 
-TICKERS = set('SPY QQQ NVDA TSLA AVGO AMD META AAPL MSFT AMZN PLTR PANW SNDK GOOG RDDT HOOD COIN JPM AXP V'.split())
+TICKERS = set('SPY QQQ NVDA TSLA AVGO AMD META AAPL MSFT AMZN PLTR PANW SNDK GOOG RDDT HOOD COIN JPM AXP V XOM CVX UNH JNJ CAT AVAV TGT SHOP UAL ENPH DDOG IREN ARM ANET IBM QCOM CRWD SNOW MSTR CRCL ORCL MRVL DELL TSM LITE NOW CRM GLW SMCI ADBE TWLO NET ASTS MRNA HPE HIMS ON WMT NBIS INTC AAOI MU DIS NFLX COST BA GS BAC UBER AMAT IWM DIA XLK XLF XLE XLV XLI XLY XLP XLU XLC XLB XLRE TLT GLD SLV GDX LLY ABBV MRK PFE HD LOW GE RTX LMT MS C WFC PYPL'.split())
+BANKS = {1: ['SPY', 'QQQ', 'NVDA', 'TSLA', 'AVGO', 'AMD', 'META', 'AAPL'], 2: ['MSFT', 'AMZN', 'PLTR', 'PANW', 'SNDK', 'GOOG', 'RDDT', 'HOOD'], 3: ['COIN', 'JPM', 'AXP', 'V', 'XOM', 'CVX', 'UNH', 'JNJ'], 4: ['CAT', 'AVAV', 'TGT', 'SHOP', 'UAL', 'ENPH', 'DDOG', 'IREN'], 5: ['ARM', 'ANET', 'IBM', 'QCOM', 'CRWD', 'SNOW', 'MSTR', 'CRCL'], 6: ['ORCL', 'MRVL', 'DELL', 'TSM', 'LITE', 'NOW', 'CRM', 'GLW'], 7: ['SMCI', 'ADBE', 'TWLO', 'NET', 'ASTS', 'MRNA', 'HPE', 'HIMS'], 8: ['ON', 'WMT', 'NBIS', 'INTC', 'AAOI', 'MU', 'DIS', 'NFLX'], 9: ['COST', 'BA', 'GS', 'BAC', 'UBER', 'AMAT', 'IWM', 'DIA'], 10: ['XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU'], 11: ['XLC', 'XLB', 'XLRE', 'TLT', 'GLD', 'SLV', 'GDX', 'LLY'], 12: ['ABBV', 'MRK', 'PFE', 'HD', 'LOW', 'GE', 'RTX', 'LMT'], 13: ['MS', 'C', 'WFC', 'PYPL']}
 PREFIX = 'swing-compare-v1:'
 ACTIONS = {'PLAN': '후보 · 다음 시가 대기', 'MODEL_ENTRY': '모의 진입 확인',
            'MODEL_EXIT': '모의 종료 확인', 'REJECTED': '후보 제외 · 시가 조건 미충족'}
@@ -66,6 +67,38 @@ def ingest(store,data,now):
         tx.put(PREFIX+'latest',record)
     return {'status':'queued','event_id':key}
 
+def ingest_bank(store,data,now):
+    if data.get('schema')!='mf.swing.bank.v1' or type(data.get('bank')) is not int or data['bank'] not in BANKS:
+        raise ValueError('bank identity')
+    for f in ('emitted_ms','bar_end_ms'):
+        if type(data.get(f)) is not int: raise ValueError('clock')
+    emitted=datetime.fromtimestamp(data['emitted_ms']/1000,timezone.utc)
+    end=datetime.fromtimestamp(data['bar_end_ms']/1000,timezone.utc)
+    if not -10 <= (now-emitted).total_seconds() <= 180 or not 0 <= (emitted-end).total_seconds() <= 180:
+        raise ValueError('stale bank')
+    health,events=data.get('health'),data.get('events')
+    if not isinstance(health,list) or not isinstance(events,list) or len(events)>64: raise ValueError('batch shape')
+    allowed=set(BANKS[data['bank']])
+    if len(health)!=len(allowed) or any(not isinstance(h,dict) for h in health): raise ValueError('health shape')
+    if {h.get('ticker') for h in health}!=allowed: raise ValueError('wrong symbols')
+    for h in health:
+        if type(h.get('bar_end_ms')) is not int or type(h.get('ready')) is not bool: raise ValueError('health fields')
+    prepared=[]
+    for event in events:
+        if not isinstance(event,dict) or event.get('ticker') not in allowed or event.get('bar_end_ms')!=data['bar_end_ms'] or event.get('emitted_ms')!=data['emitted_ms']:
+            raise ValueError('event identity')
+        prepared.append(prepare(event,now))
+    # Validate the complete batch before any state/queue writes.
+    with store.transaction() as tx:
+        queued=0
+        for key,msg,record in prepared:
+            if tx.get(key): continue
+            tx.put(key,record);tx.event(key,now.date().isoformat(),record)
+            tx.enqueue(key,{'text':msg,'expires_at':(now+timedelta(seconds=180)).isoformat()})
+            tx.put(PREFIX+'latest',record);queued+=1
+        tx.put(PREFIX+'bank:'+str(data['bank']),{'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],'health':health,'events':len(events),'queued':queued})
+    return {'status':'accepted','bank':data['bank'],'queued':queued}
+
 def install(app,storage,send):
     def authenticate(value):
         secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
@@ -92,7 +125,7 @@ def install(app,storage,send):
             result={'delivery':drain(store,send,prefix=PREFIX,limit=12)}
         else:
             with store.transaction() as tx:
-                result={'latest':tx.get(PREFIX+'latest'), 'outbox':tx.execute("SELECT status,COUNT(*) FROM mf_outbox WHERE id LIKE ? GROUP BY status",(PREFIX+'%',)).fetchall()}
+                result={'latest':tx.get(PREFIX+'latest'), 'banks':{i:tx.get(PREFIX+'bank:'+str(i)) for i in BANKS}, 'outbox':tx.execute("SELECT status,COUNT(*) FROM mf_outbox WHERE id LIKE ? GROUP BY status",(PREFIX+'%',)).fetchall()}
         return '<!doctype html><meta charset="utf-8"><h1>SWING TEST 결과</h1><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre>'
 
     @app.post('/webhook/swing-compare-v1')
@@ -101,4 +134,12 @@ def install(app,storage,send):
         try: result=ingest(storage(),data,datetime.now(timezone.utc))
         except (ValueError,TypeError,OverflowError): raise HTTPException(422,'Invalid swing comparison event') from None
         background_tasks.add_task(drain,storage(),send,limit=12,prefix=PREFIX)
+        return result
+
+    @app.post('/webhook/swing-bank-v1')
+    def bank_intake(data:dict,background_tasks:BackgroundTasks):
+        authenticate(data.get('secret'))
+        try: result=ingest_bank(storage(),data,datetime.now(timezone.utc))
+        except (ValueError,TypeError,OverflowError,KeyError): raise HTTPException(422,'Invalid swing bank event') from None
+        background_tasks.add_task(drain,storage(),send,limit=64,prefix=PREFIX)
         return result
