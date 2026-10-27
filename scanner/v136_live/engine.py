@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from typing import Optional
 import math
 
-VERSION = "MF_V13_36_RESEARCH"
+VERSION = "MF_V13_37_ALIGNED_3M"
 ET = ZoneInfo("America/New_York")
 SYMBOLS = tuple("SPY QQQ NVDA TSLA AVGO AMD META AAPL MSFT AMZN PLTR PANW SNDK GOOG RDDT HOOD COIN JPM AXP V".split())
 
@@ -177,18 +177,19 @@ class Engine:
             state.position = None
             state.cooldown_end = bar.end + timedelta(minutes=self.cfg.exit_cooldown_minutes)
             state.flat_sent = True
-        if not state.position and local.time() < self.cfg.entry_cutoff_et and (state.cooldown_end is None or bar.end >= state.cooldown_end):
-            for tf in (1, 2, 3):
-                if tf not in windows_closed:
-                    continue
-                direction = self._entry_side(state.windows[tf], vwap)
-                if direction:
-                    state.episode += 1
-                    state.position = Position(direction, bar.close, bar.end, state.episode, bar.close)
-                    state.opposites.clear()
-                    events.append(self._event(bar, state, "MC" if direction == 1 else "SCMP", tf,
-                                              "confirmed close; strength+breakout+trend+volume", catalyst))
-                    break
+        if (3 in windows_closed and not state.position and local.time() < self.cfg.entry_cutoff_et
+                and (state.cooldown_end is None or bar.end >= state.cooldown_end)):
+            # Evaluate once at the 3m close. The latest COMPLETED 2m bar can
+            # end one minute earlier; never read its unfinished pending bar.
+            direction = self._entry_side(state.windows[3], vwap)
+            aligned = direction != 0 and all(
+                self._trend(state.windows[tf], vwap) == direction for tf in (1, 2, 3))
+            if aligned:
+                state.episode += 1
+                state.position = Position(direction, bar.close, bar.end, state.episode, bar.close)
+                state.opposites.clear()
+                events.append(self._event(bar, state, "MC" if direction == 1 else "SCMP", 3,
+                                          "1m+2m+3m direction aligned; confirmed 3m setup", catalyst))
         if state.position and 10 in windows_closed and not state.position.continued:
             if self._trend(state.windows[5], vwap) == state.position.side and self._trend(state.windows[10], vwap) == state.position.side:
                 events.append(self._event(bar, state, "CTN", 10, "5m+10m trend aligned", catalyst))
