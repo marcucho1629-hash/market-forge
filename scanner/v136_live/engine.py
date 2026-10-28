@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from typing import Optional
 import math
 
-VERSION = "MF_V13_37_ALIGNED_3M"
+VERSION = "MF_V13_38_SIGNAL_SEQUENCE"
 ET = ZoneInfo("America/New_York")
 SYMBOLS = tuple("SPY QQQ NVDA TSLA AVGO AMD META AAPL MSFT AMZN PLTR PANW SNDK GOOG RDDT HOOD COIN JPM AXP V".split())
 
@@ -141,12 +141,42 @@ class TickerState:
     total_volume: float = 0.0
     opposites: deque[tuple[int, float]] = field(default_factory=lambda: deque(maxlen=2))
     flat_sent: bool = False
+    signal_cycle: int = -1
+    entry_signals: dict[int, tuple[int, datetime]] = field(default_factory=dict)
 
 
 class Engine:
     def __init__(self, cfg: Optional[Config] = None):
         self.cfg = cfg or Config()
         self.states: dict[str, TickerState] = {}
+
+    def seed(self, bars: list[Bar]) -> None:
+        """Warm indicators only from one prior contiguous RTH session. No events/positions."""
+        if not bars:
+            return
+        symbol = bars[0].ticker
+        if symbol in self.states:
+            raise ValueError("seed must precede session")
+        state = TickerState()
+        previous = None
+        day = bars[0].end.astimezone(ET).date()
+        for b in bars:
+            b.validate()
+            local = b.end.astimezone(ET)
+            if b.ticker != symbol or local.date() != day:
+                raise ValueError("mixed seed session")
+            if previous is not None and b.end - previous != timedelta(minutes=1):
+                raise ValueError("seed gap")
+            minute = local.hour * 60 + local.minute - 570
+            if previous is None and minute != 1:
+                raise ValueError("seed must begin at session open")
+            for w in state.windows.values():
+                w.push(b, minute)
+            previous = b.end
+        for w in state.windows.values():
+            w.pending.clear()
+        state.date = day
+        self.states[symbol] = state
 
     def on_bar(self, bar: Bar, catalyst: Optional[str] = None) -> list[Event]:
         """Accept ONLY final one-minute bars in ascending contiguous order.
@@ -158,7 +188,10 @@ class Engine:
         if state.date != local.date():
             if state.date is not None and state.position is not None:
                 raise ValueError("previous session position not closed: fail safely")
-            self.states[bar.ticker] = state = TickerState(date=local.date())
+            windows = state.windows
+            for w in windows.values():
+                w.pending.clear()
+            self.states[bar.ticker] = state = TickerState(date=local.date(), windows=windows)
         minute_in_session = (local.hour * 60 + local.minute) - (9 * 60 + 30)
         if state.last_end is None and minute_in_session != 1:
             raise ValueError("session must start at 09:31 ET bar close for correct aggregation")
@@ -177,19 +210,34 @@ class Engine:
             state.position = None
             state.cooldown_end = bar.end + timedelta(minutes=self.cfg.exit_cooldown_minutes)
             state.flat_sent = True
-        if (3 in windows_closed and not state.position and local.time() < self.cfg.entry_cutoff_et
-                and (state.cooldown_end is None or bar.end >= state.cooldown_end)):
-            # Evaluate once at the 3m close. The latest COMPLETED 2m bar can
-            # end one minute earlier; never read its unfinished pending bar.
-            direction = self._entry_side(state.windows[3], vwap)
-            aligned = direction != 0 and all(
-                self._trend(state.windows[tf], vwap) == direction for tf in (1, 2, 3))
-            if aligned:
+        cycle = (minute_in_session - 1) // 3
+        if state.signal_cycle != cycle:
+            state.signal_cycle = cycle
+            state.entry_signals.clear()
+        if not state.position:
+            for tf in (1, 2, 3):
+                if tf not in windows_closed:
+                    continue
+                # Do not carry a 2m candle beginning in the previous 3m cycle.
+                if minute_in_session - tf < cycle * 3:
+                    continue
+                direction = self._entry_side(state.windows[tf], vwap)
+                if direction:
+                    if any(side != direction for side, _ in state.entry_signals.values()):
+                        state.entry_signals.clear()
+                    state.entry_signals[tf] = (direction, bar.end)
+            signals = state.entry_signals
+            aligned = (all(tf in signals for tf in (1, 2, 3)) and
+                       len({signals[tf][0] for tf in (1, 2, 3)}) == 1)
+            if (3 in windows_closed and aligned and local.time() < self.cfg.entry_cutoff_et
+                    and (state.cooldown_end is None or bar.end >= state.cooldown_end)):
+                direction = signals[3][0]
                 state.episode += 1
                 state.position = Position(direction, bar.close, bar.end, state.episode, bar.close)
                 state.opposites.clear()
                 events.append(self._event(bar, state, "MC" if direction == 1 else "SCMP", 3,
-                                          "1m+2m+3m direction aligned; confirmed 3m setup", catalyst))
+                                          "1m+2m+3m entry signals matched within same 3m cycle", catalyst))
+                state.entry_signals.clear()
         if state.position and 10 in windows_closed and not state.position.continued:
             if self._trend(state.windows[5], vwap) == state.position.side and self._trend(state.windows[10], vwap) == state.position.side:
                 events.append(self._event(bar, state, "CTN", 10, "5m+10m trend aligned", catalyst))

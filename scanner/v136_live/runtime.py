@@ -7,7 +7,7 @@ from ..calendar import schedule
 from ..store import drain
 
 VERSION = 'MF_V136_RESEARCH_LIVE_1'
-PREFIX = 'research137aligned:'
+PREFIX = 'research138sequence:'
 CONTROL_KEY = 'research136live:control'  # Keep the existing explicit activation/expiry.
 BANKS = {1: SYMBOLS[:10], 2: SYMBOLS[10:]}
 DENVER = ZoneInfo('America/Denver')
@@ -22,6 +22,24 @@ def enabled(tx, now):
 
 def queue(tx, identity, text, now):
     tx.enqueue(identity, {'text': text, 'expires_at': (now+timedelta(seconds=90)).isoformat()})
+
+def prior_seed(tx, symbol, day):
+    # Freeze a validated prior-session seed per day, so replays cannot change mid-session.
+    target = datetime.fromisoformat(day).date()
+    for back in range(1, 11):
+        prior = (target-timedelta(days=back)).isoformat()
+        for prefix in (PREFIX, 'research137aligned:'):
+            rows = tx.get(prefix+prior+':'+symbol, {}).get('bars', [])
+            if len(rows) < 90:
+                continue
+            try:
+                bars = [Bar(symbol, dt(r[1]), *r[2:]) for r in rows if r[0] == symbol]
+                check = Engine(); check.seed(bars)
+                if len(bars) == len(rows) and bars[-1].end.astimezone(ET).date().isoformat() == prior:
+                    return rows
+            except (ValueError, TypeError, IndexError):
+                pass
+    return []
 
 def ingest(store, data, now, calendar=schedule):
     if data.get('source') != VERSION or type(data.get('bank')) is not int or data['bank'] not in BANKS:
@@ -58,6 +76,10 @@ def ingest(store, data, now, calendar=schedule):
             if not new: continue
             key=PREFIX+day+':'+symbol
             state=tx.get(key,{'bars':[], 'processed':0, 'sent_entry':None})
+            if 'seed_bars' not in state:
+                state['seed_bars'] = prior_seed(tx, symbol, day)
+                state['seed_count'] = len(state['seed_bars'])
+                state['warmup_mode'] = 'prior_session' if state['seed_bars'] else 'cold_start'
             saved={r[1]:r for r in state['bars']}
             conflict=False
             for r in new:
@@ -78,6 +100,7 @@ def ingest(store, data, now, calendar=schedule):
             cfg=Config(entry_cutoff_et=min(Config().entry_cutoff_et,(closed-timedelta(minutes=30)).astimezone(ET).time()),
                        flat_alert_et=min(Config().flat_alert_et,(closed-timedelta(minutes=15)).astimezone(ET).time()))
             engine=Engine(cfg)
+            engine.seed([Bar(symbol,dt(r[1]),*r[2:]) for r in state['seed_bars']])
             for r in continuous:
                 events=engine.on_bar(Bar(symbol,dt(r[1]),*r[2:]))
                 if r[1]<=state['processed']: continue
@@ -92,7 +115,7 @@ def ingest(store, data, now, calendar=schedule):
                         if e.action in ('MC','SCMP'): state['sent_entry']=e.episode
                         entry_sent=e.action in ('MC','SCMP') or tx.execute("SELECT id FROM mf_outbox WHERE status='sent' AND id LIKE ? LIMIT 1",(f'{PREFIX}{day}:{symbol}:{e.episode}:' + ('MC' if e.side==1 else 'SCMP') + ':%',)).fetchone()
                         if state.get('sent_entry')==e.episode and entry_sent:
-                            detail = '1·2·3분 방향 일치 · 3분봉 확정' if e.action in ('MC','SCMP') else f'{e.timeframe}분봉 종료/추세 관리'
+                            detail = '1·2·3분 신호 일치 · 3분봉 확정' if e.action in ('MC','SCMP') else f'{e.timeframe}분봉 종료/추세 관리'
                             text=(f'DAY TEST {symbol} {e.action}\n${e.price:.2f} · {detail} · BATS\n'
                                   f'봉 마감 {e.time.astimezone(DENVER):%Y-%m-%d %H:%M:%S} 덴버\n'
                                   f'연구용 신호 · 주문 아님\nID {day}-{symbol}-{e.episode}')
@@ -120,7 +143,7 @@ def control(store,on,now):
         tx.put(CONTROL_KEY,cfg)
         if on:
             queue(tx,PREFIX+'setup:'+now.isoformat(),
-                  'DAY TEST 수신 경로 활성화\n20종목 · 1·2·3분 방향 일치 후 3분봉 마감 진입\n종료/보호 신호 별도 · 7일 테스트 · 주문 없음',now)
+                  'DAY TEST 수신 경로 활성화\n20종목 · 1·2·3분 MC/SCMP 신호 일치 후 3분봉 마감 진입\n종료/보호 신호 별도 · 7일 테스트 · 주문 없음',now)
         else: tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",(PREFIX+'%',))
         return cfg
 
@@ -130,7 +153,7 @@ def status(store,now):
         states={}
         for symbol in SYMBOLS:
             s=tx.get(PREFIX+day+':'+symbol,{})
-            states[symbol]={k:v for k,v in s.items() if k!='bars'} | {'bar_count':len(s.get('bars',[]))}
+            states[symbol]={k:v for k,v in s.items() if k not in ('bars','seed_bars')} | {'bar_count':len(s.get('bars',[]))}
         outbox=tx.execute('SELECT status,COUNT(*) FROM mf_outbox WHERE id LIKE ? GROUP BY status',(PREFIX+'%',)).fetchall()
         return {'source':VERSION,'engine':ENGINE_VERSION,'control':tx.get(CONTROL_KEY,{}),'outbox':dict(outbox),
                 'banks':{i:tx.get(PREFIX+'bank:'+str(i),{}) for i in BANKS},'symbols':states,
