@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from typing import Optional
 import math
 
-VERSION = "MF_V13_38_SIGNAL_SEQUENCE"
+VERSION = "MF_V13_39_DATA_RECOVERY"
 ET = ZoneInfo("America/New_York")
 SYMBOLS = tuple("SPY QQQ NVDA TSLA AVGO AMD META AAPL MSFT AMZN PLTR PANW SNDK GOOG RDDT HOOD COIN JPM AXP V".split())
 
@@ -100,6 +100,9 @@ class Window:
             return False
         bars = self.pending
         self.pending = []
+        # A missing minute must never become a fabricated complete multi-minute bar.
+        if len(bars) != self.tf or any(b.end-a.end != timedelta(minutes=1) for a,b in zip(bars,bars[1:])):
+            return False
         b = Bar(bar.ticker, bar.end, bars[0].open, max(v.high for v in bars),
                 min(v.low for v in bars), bars[-1].close, sum(v.volume for v in bars))
         old = self.latest
@@ -141,6 +144,8 @@ class TickerState:
     total_volume: float = 0.0
     opposites: deque[tuple[int, float]] = field(default_factory=lambda: deque(maxlen=2))
     flat_sent: bool = False
+    recovery_until: Optional[datetime] = None
+    data_gaps: int = 0
     signal_cycle: int = -1
     entry_signals: dict[int, tuple[int, datetime]] = field(default_factory=dict)
 
@@ -150,7 +155,7 @@ class Engine:
         self.cfg = cfg or Config()
         self.states: dict[str, TickerState] = {}
 
-    def seed(self, bars: list[Bar]) -> None:
+    def seed(self, bars: list[Bar], allow_gaps: bool = False) -> None:
         """Warm indicators only from one prior contiguous RTH session. No events/positions."""
         if not bars:
             return
@@ -166,9 +171,12 @@ class Engine:
             if b.ticker != symbol or local.date() != day:
                 raise ValueError("mixed seed session")
             if previous is not None and b.end - previous != timedelta(minutes=1):
-                raise ValueError("seed gap")
+                if not allow_gaps or b.end <= previous:
+                    raise ValueError("seed gap")
+                for w in state.windows.values():
+                    w.pending.clear()
             minute = local.hour * 60 + local.minute - 570
-            if previous is None and minute != 1:
+            if previous is None and minute != 1 and not allow_gaps:
                 raise ValueError("seed must begin at session open")
             for w in state.windows.values():
                 w.push(b, minute)
@@ -177,6 +185,29 @@ class Engine:
             w.pending.clear()
         state.date = day
         self.states[symbol] = state
+
+    def recover_gap(self, bar: Bar) -> None:
+        """Explicit recovery on real data; preserve positions, discard incomplete bars.
+        New entries wait for the NEXT complete 3m cycle. No prices are filled in.
+        """
+        bar.validate()
+        state = self.states.get(bar.ticker)
+        if state is None or state.date != bar.end.astimezone(ET).date():
+            windows = state.windows if state else {t: Window(t) for t in (1,2,3,5,10)}
+            state = TickerState(date=bar.end.astimezone(ET).date(),windows=windows)
+            self.states[bar.ticker] = state
+        if state.last_end and bar.end <= state.last_end:
+            raise ValueError("recovery cannot rewind")
+        for w in state.windows.values():
+            w.pending.clear()
+        state.entry_signals.clear()
+        state.opposites.clear()
+        state.data_gaps += 1
+        local = bar.end.astimezone(ET)
+        minute = local.hour*60+local.minute-570
+        # Finish the current interrupted cycle; allow the full following cycle.
+        state.recovery_until = bar.end + timedelta(minutes=(3-minute%3)%3+1)
+        state.last_end = bar.end-timedelta(minutes=1)
 
     def on_bar(self, bar: Bar, catalyst: Optional[str] = None) -> list[Event]:
         """Accept ONLY final one-minute bars in ascending contiguous order.
@@ -214,7 +245,7 @@ class Engine:
         if state.signal_cycle != cycle:
             state.signal_cycle = cycle
             state.entry_signals.clear()
-        if not state.position:
+        if not state.position and (state.recovery_until is None or bar.end >= state.recovery_until):
             for tf in (1, 2, 3):
                 if tf not in windows_closed:
                     continue
@@ -238,7 +269,7 @@ class Engine:
                 events.append(self._event(bar, state, "MC" if direction == 1 else "SCMP", 3,
                                           "1m+2m+3m entry signals matched within same 3m cycle", catalyst))
                 state.entry_signals.clear()
-        if state.position and 10 in windows_closed and not state.position.continued:
+        if state.position and state.position.entered < bar.end and 10 in windows_closed and not state.position.continued:
             if self._trend(state.windows[5], vwap) == state.position.side and self._trend(state.windows[10], vwap) == state.position.side:
                 events.append(self._event(bar, state, "CTN", 10, "5m+10m trend aligned", catalyst))
                 state.position.continued = True

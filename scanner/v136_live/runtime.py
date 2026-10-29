@@ -7,7 +7,8 @@ from ..calendar import schedule
 from ..store import drain
 
 VERSION = 'MF_V136_RESEARCH_LIVE_1'
-PREFIX = 'research138sequence:'
+PREFIX = 'research139recovery:'
+ENTRY_MAX_AGE = 45
 CONTROL_KEY = 'research136live:control'  # Keep the existing explicit activation/expiry.
 BANKS = {1: SYMBOLS[:10], 2: SYMBOLS[10:]}
 DENVER = ZoneInfo('America/Denver')
@@ -20,21 +21,21 @@ def enabled(tx, now):
     c = tx.get(CONTROL_KEY, {})
     return c.get('enabled') is True and now < datetime.fromisoformat(c['expires_at'])
 
-def queue(tx, identity, text, now):
-    tx.enqueue(identity, {'text': text, 'expires_at': (now+timedelta(seconds=90)).isoformat()})
+def queue(tx, identity, text, now, expires_at=None):
+    tx.enqueue(identity, {'text': text, 'expires_at': (expires_at or now+timedelta(seconds=90)).isoformat()})
 
 def prior_seed(tx, symbol, day):
     # Freeze a validated prior-session seed per day, so replays cannot change mid-session.
     target = datetime.fromisoformat(day).date()
     for back in range(1, 11):
         prior = (target-timedelta(days=back)).isoformat()
-        for prefix in (PREFIX, 'research137aligned:'):
+        for prefix in (PREFIX, 'research138sequence:', 'research137aligned:'):
             rows = tx.get(prefix+prior+':'+symbol, {}).get('bars', [])
             if len(rows) < 90:
                 continue
             try:
                 bars = [Bar(symbol, dt(r[1]), *r[2:]) for r in rows if r[0] == symbol]
-                check = Engine(); check.seed(bars)
+                check = Engine(); check.seed(bars, allow_gaps=True)
                 if len(bars) == len(rows) and bars[-1].end.astimezone(ET).date().isoformat() == prior:
                     return rows
             except (ValueError, TypeError, IndexError):
@@ -84,31 +85,43 @@ def ingest(store, data, now, calendar=schedule):
             conflict=False
             for r in new:
                 if r[1] in saved and saved[r[1]]!=r: conflict=True
-                elif r[1] not in saved: saved[r[1]]=r; accepted+=1
+                elif r[1] not in saved:
+                    saved[r[1]]=r; accepted+=1
+                    if r[1] <= state['processed']:
+                        state.setdefault('ignored_backfills',[]).append(r[1])
             state['bars']=sorted(saved.values(),key=lambda r:r[1])
             state['received_at']=now.isoformat()
             if conflict: state['halted']='conflicting revision of final bar'
             first=int((opened+timedelta(minutes=1)).timestamp()*1000)
-            continuous=[]
+            continuous=[r for r in state['bars'] if r[1] not in state.get('ignored_backfills',[])]
             expected=first
-            for r in state['bars']:
-                if r[1]!=expected: break
-                continuous.append(r);expected+=60000
-            missing=expected if len(continuous)<len(state['bars']) else None
-            state['missing_end']=missing
+            gaps=[]
+            for r in continuous:
+                if r[1] > expected:
+                    gaps.append({'from_ms':expected,'to_ms':r[1]-60000,'resumed_ms':r[1]})
+                expected=r[1]+60000
+            state['gaps']=gaps
+            state['missing_end']=gaps[0]['from_ms'] if gaps else None
+            state['data_quality']='partial_minutes' if gaps else 'complete'
             # Reconstruct from persisted raw bars: no untrusted pickle, no in-memory dependency.
             cfg=Config(entry_cutoff_et=min(Config().entry_cutoff_et,(closed-timedelta(minutes=30)).astimezone(ET).time()),
                        flat_alert_et=min(Config().flat_alert_et,(closed-timedelta(minutes=15)).astimezone(ET).time()))
             engine=Engine(cfg)
-            engine.seed([Bar(symbol,dt(r[1]),*r[2:]) for r in state['seed_bars']])
+            engine.seed([Bar(symbol,dt(r[1]),*r[2:]) for r in state['seed_bars']], allow_gaps=True)
+            expected=first
             for r in continuous:
+                if r[1] != expected:
+                    engine.recover_gap(Bar(symbol,dt(r[1]),*r[2:]))
+                expected=r[1]+60000
                 events=engine.on_bar(Bar(symbol,dt(r[1]),*r[2:]))
                 if r[1]<=state['processed']: continue
                 for e in events:
                     event=asdict(e);event['time']=e.time.isoformat()
                     eid=f'{PREFIX}{day}:{symbol}:{e.episode}:{e.action}:{r[1]}'
-                    fresh=0 <= (now-e.time).total_seconds() <= 90
-                    event.update(source=VERSION,engine=ENGINE_VERSION,feed='BATS:'+symbol,received_at=now.isoformat(),replay_only=not fresh)
+                    age=(now-e.time).total_seconds()
+                    is_entry=e.action in ('MC','SCMP')
+                    fresh=0 <= age <= (ENTRY_MAX_AGE if is_entry else 90)
+                    event.update(source=VERSION,engine=ENGINE_VERSION,feed='BATS:'+symbol,received_at=now.isoformat(),replay_only=not fresh,bar_to_receive_sec=age,data_quality=state['data_quality'],delivery_decision=('eligible' if active and fresh and not state.get('halted') else 'stale' if not fresh else 'inactive_or_halted'))
                     tx.event(eid,day,event)
                     if active and fresh and not state.get('halted'):
                         # Never announce exits/continuations for an entry that was not queued live.
@@ -116,15 +129,21 @@ def ingest(store, data, now, calendar=schedule):
                         entry_sent=e.action in ('MC','SCMP') or tx.execute("SELECT id FROM mf_outbox WHERE status='sent' AND id LIKE ? LIMIT 1",(f'{PREFIX}{day}:{symbol}:{e.episode}:' + ('MC' if e.side==1 else 'SCMP') + ':%',)).fetchone()
                         if state.get('sent_entry')==e.episode and entry_sent:
                             detail = '1·2·3분 신호 일치 · 3분봉 확정' if e.action in ('MC','SCMP') else f'{e.timeframe}분봉 종료/추세 관리'
-                            text=(f'DAY TEST {symbol} {e.action}\n${e.price:.2f} · {detail} · BATS\n'
+                            quality=' · 일부 1분봉 누락 후 재개' if gaps else ''
+                            text=(f'DAY TEST {symbol} {e.action}\n${e.price:.2f} · {detail} · BATS{quality}\n'
                                   f'봉 마감 {e.time.astimezone(DENVER):%Y-%m-%d %H:%M:%S} 덴버\n'
                                   f'연구용 신호 · 주문 아님\nID {day}-{symbol}-{e.episode}')
-                            queue(tx,eid,text,now)
+                            queue(tx,eid,text,now,expires_at=e.time+timedelta(seconds=ENTRY_MAX_AGE) if is_entry else None)
                 state['processed']=r[1]
             state['position']=asdict(engine.states[symbol].position) if symbol in engine.states and engine.states[symbol].position else None
             if state['position']: state['position']['entered']=state['position']['entered'].isoformat()
-            if active and (state.get('halted') or (missing and (now-dt(missing)).total_seconds()>90)):
-                queue(tx,f'{PREFIX}{day}:{symbol}:DATA_GAP',f'NEW TEST {symbol} 데이터 누락/충돌\n계산 중단: 확정 1분봉 복구 필요. 청산 신호가 아닙니다.',now)
+            if active and state.get('halted'):
+                queue(tx,f'{PREFIX}{day}:{symbol}:DATA_CONFLICT',f'DAY TEST {symbol} 확정봉 충돌: 신규 신호 중지',now)
+            if active and gaps and state.get('notified_gaps',0)<len(gaps):
+                last=gaps[-1]
+                queue(tx,f'{PREFIX}{day}:{symbol}:DATA_GAP:{last["from_ms"]}',
+                      f'DAY TEST {symbol} 데이터 누락 감지\n누락 가격을 보충하지 않고 새 완성봉부터 재개합니다. 누락 구간 판단은 불가합니다.',now)
+                state['notified_gaps']=len(gaps)
             tx.put(key,state)
         tx.put(PREFIX+'bank:'+str(data['bank']),{'received_at':now.isoformat(),'day':day,'accepted':accepted,'submitted':len(rows)})
     return {'source':VERSION,'accepted':accepted,'bank':data['bank']}
@@ -134,7 +153,7 @@ def delivery(store,send,now):
         active=enabled(tx,now)
         if not active:
             tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",(PREFIX+'%',))
-    return drain(store,send,limit=30,prefix=PREFIX,now=now) if active else []
+    return drain(store,send,limit=30,prefix=PREFIX,now=None) if active else []
 
 def control(store,on,now):
     if type(on) is not bool: raise ValueError('boolean required')
@@ -157,4 +176,19 @@ def status(store,now):
         outbox=tx.execute('SELECT status,COUNT(*) FROM mf_outbox WHERE id LIKE ? GROUP BY status',(PREFIX+'%',)).fetchall()
         return {'source':VERSION,'engine':ENGINE_VERSION,'control':tx.get(CONTROL_KEY,{}),'outbox':dict(outbox),
                 'banks':{i:tx.get(PREFIX+'bank:'+str(i),{}) for i in BANKS},'symbols':states,
-                'events':[e for e in tx.events(day) if e.get('engine')==ENGINE_VERSION]}
+                'events':[e for e in tx.events(day) if e.get('engine')==ENGINE_VERSION],
+                'deliveries':[{'id':r[0],'status':r[1]} for r in tx.execute('SELECT id,status FROM mf_outbox WHERE id LIKE ?',(PREFIX+day+':%',)).fetchall()]}
+
+
+def diagnostic_export(store, now):
+    day=now.astimezone(ET).date().isoformat()
+    with store.transaction() as tx:
+        result={}
+        for symbol in SYMBOLS:
+            for prefix in (PREFIX,'research138sequence:','research137aligned:'):
+                value=tx.get(prefix+day+':'+symbol,{})
+                if value.get('bars'):
+                    result[symbol]={'prefix':prefix,'bars':value['bars'],'seed_bars':value.get('seed_bars',[]),'ignored_backfills':value.get('ignored_backfills',[])}
+                    break
+        return {'day':day,'symbols':result,'events':tx.events(day),
+                'deliveries':[{'id':r[0],'status':r[1]} for r in tx.execute('SELECT id,status FROM mf_outbox WHERE id LIKE ? OR id LIKE ?',(PREFIX+day+':%','research138sequence:'+day+':%')).fetchall()]}

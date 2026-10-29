@@ -31,7 +31,7 @@ def install(app,storage,send):
 <h1>새 연구 엔진 장중 테스트</h1><p>확정 1분봉 · 20종목 · 기존 엔진과 별도 기록 · 주문 없음</p>
 <form method="post" action="/research-v136-live/control">
 <label>기존 웹훅 키 <input name="secret" type="password" required autocomplete="off"></label>
-<button name="action" value="status">수신 상태 확인</button>
+<button name="action" value="status">수신 상태 확인</button>\n<button name="action" value="export">오늘 분석 데이터 보기</button>
 <button name="action" value="enable">7일 테스트 활성화</button>
 <button name="action" value="disable">테스트 중지</button>
 <button name="action" value="deliver">대기 메시지 전달</button></form>'''
@@ -49,5 +49,7 @@ def install(app,storage,send):
             result={'control':cfg,'delivery':runtime.delivery(storage(),send,now)}
         elif action=='deliver': result={'delivery':runtime.delivery(storage(),send,now)}
         elif action=='status': result=runtime.status(storage(),now)
+        elif action=='export': result=runtime.diagnostic_export(storage(),now)
         else: raise HTTPException(400,'Unknown action')
         return '<!doctype html><meta charset="utf-8"><h1>Research status</h1><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre><a href="/research-v136-live">Back</a>'
+
