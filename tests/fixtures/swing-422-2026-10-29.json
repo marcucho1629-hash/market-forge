@@ -1,0 +1,67 @@
+{
+  "schema": "mf.swing.bank.v1",
+  "bank": 10,
+  "emitted_ms": 1793304000744,
+  "bar_end_ms": 1793304000000,
+  "health": [
+    {
+      "ticker": "XLK",
+      "bar_end_ms": 1793304000000,
+      "ready": true
+    },
+    {
+      "ticker": "XLF",
+      "bar_end_ms": 1793304000000,
+      "ready": true
+    },
+    {
+      "ticker": "XLE",
+      "bar_end_ms": 1793304000000,
+      "ready": true
+    },
+    {
+      "ticker": "XLV",
+      "bar_end_ms": 1793304000000,
+      "ready": true
+    },
+    {
+      "ticker": "XLI",
+      "bar_end_ms": 1793304000000,
+      "ready": true
+    },
+    {
+      "ticker": "XLY",
+      "bar_end_ms": 1793304000000,
+      "ready": true
+    },
+    {
+      "ticker": "XLP",
+      "bar_end_ms": 1793304000000,
+      "ready": true
+    },
+    {
+      "ticker": "XLU",
+      "bar_end_ms": 1793304000000,
+      "ready": true
+    }
+  ],
+  "events": [
+    {
+      "schema": "mf.swing.compare.v1",
+      "ticker": "XLK",
+      "feed": "BATS:XLK",
+      "model": 0,
+      "horizon": "2-5",
+      "room": "1.5R",
+      "action": "PLAN",
+      "side": 1,
+      "price": 188.67,
+      "stop": 184.17374791,
+      "target": 197.66250417,
+      "event_ms": 1793304000000,
+      "bar_end_ms": 1793304000000,
+      "emitted_ms": 1793303970195,
+      "reason": "NEXT_OPEN_PENDING"
+    }
+  ]
+}

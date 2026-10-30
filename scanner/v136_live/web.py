@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs
 from fastapi import Request, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse
-from . import runtime
+from . import runtime, launch_shadow
 
 def auth(value):
     secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
@@ -20,7 +20,9 @@ def install(app,storage,send):
         try:
             now=datetime.now(timezone.utc)
             result=runtime.ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now)
-            background_tasks.add_task(runtime.delivery,storage(),send,now)
+            background_tasks.add_task(launch_shadow.deliver_and_record,storage(),send,now)
+            if result.get("accepted",0)>0:
+                background_tasks.add_task(launch_shadow.capture,storage(),now,data.get("emitted"))
             return result
         except (ValueError,TypeError,KeyError,OverflowError):
             raise HTTPException(422,'Invalid final one-minute bars') from None
@@ -32,6 +34,8 @@ def install(app,storage,send):
 <form method="post" action="/research-v136-live/control">
 <label>기존 웹훅 키 <input name="secret" type="password" required autocomplete="off"></label>
 <button name="action" value="status">수신 상태 확인</button>\n<button name="action" value="export">오늘 분석 데이터 보기</button>
+<button name="action" value="shadow_status">5종목 Shadow 결과</button>
+<button name="action" value="shadow_run">저장 데이터 Shadow 비교</button>
 <button name="action" value="enable">7일 테스트 활성화</button>
 <button name="action" value="disable">테스트 중지</button>
 <button name="action" value="deliver">대기 메시지 전달</button></form>'''
@@ -49,6 +53,10 @@ def install(app,storage,send):
             result={'control':cfg,'delivery':runtime.delivery(storage(),send,now)}
         elif action=='deliver': result={'delivery':runtime.delivery(storage(),send,now)}
         elif action=='status': result=runtime.status(storage(),now)
+        elif action=='shadow_status': result=launch_shadow.status(storage(),now)
+        elif action=='shadow_run':
+            launch_shadow.capture(storage(),now)
+            result=launch_shadow.status(storage(),now)
         elif action=='export': result=runtime.diagnostic_export(storage(),now)
         else: raise HTTPException(400,'Unknown action')
         return '<!doctype html><meta charset="utf-8"><h1>Research status</h1><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre><a href="/research-v136-live">Back</a>'

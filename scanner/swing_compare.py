@@ -85,9 +85,15 @@ def ingest_bank(store,data,now):
         if type(h.get('bar_end_ms')) is not int or type(h.get('ready')) is not bool: raise ValueError('health fields')
     prepared=[]
     for event in events:
-        if not isinstance(event,dict) or event.get('ticker') not in allowed or event.get('bar_end_ms')!=data['bar_end_ms'] or event.get('emitted_ms')!=data['emitted_ms']:
+        if not isinstance(event,dict) or event.get('ticker') not in allowed or event.get('bar_end_ms')!=data['bar_end_ms']:
             raise ValueError('event identity')
-        prepared.append(prepare(event,now))
+        # request.security calculations carry a per-symbol calculation clock.
+        # The authenticated outer envelope is the actual webhook emission clock.
+        computed=event.get('emitted_ms')
+        if type(computed) is not int or computed > data['emitted_ms']+10000:
+            raise ValueError('event clock')
+        normalized=dict(event,source_computed_ms=computed,emitted_ms=data['emitted_ms'])
+        prepared.append(prepare(normalized,now))
     # Validate the complete batch before any state/queue writes.
     with store.transaction() as tx:
         queued=0
@@ -97,6 +103,8 @@ def ingest_bank(store,data,now):
             tx.enqueue(key,{'text':msg,'expires_at':(now+timedelta(seconds=180)).isoformat()})
             tx.put(PREFIX+'latest',record);queued+=1
         tx.put(PREFIX+'bank:'+str(data['bank']),{'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],'health':health,'events':len(events),'queued':queued})
+        trace={'bank':data['bank'],'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],'emitted_ms':data['emitted_ms'],'health':health,'events':len(events),'queued':queued}
+        tx.put('swing-diagnostic:hour:'+str(data['bank'])+':'+str(data['bar_end_ms']),trace)
     return {'status':'accepted','bank':data['bank'],'queued':queued}
 
 def install(app,storage,send):
@@ -110,7 +118,7 @@ def install(app,storage,send):
         return '''<!doctype html><meta charset="utf-8"><h1>SWING TEST 연결</h1>
 <p>1시간봉 비교용 모의 기록 · 주문 없음</p>
 <form method="post" action="/swing-compare/control"><label>웹훅 키 <input type="password" name="secret" autocomplete="off" required></label>
-<button name="action" value="status">상태 확인</button><button name="action" value="test">Telegram 연결 테스트</button></form>'''
+<button name="action" value="status">상태 확인</button><button name="action" value="diagnostics">100종목 진단 이력</button><button name="action" value="test">Telegram 연결 테스트</button></form>'''
 
     @app.post('/swing-compare/control',response_class=HTMLResponse)
     async def control(request:Request):
@@ -123,6 +131,8 @@ def install(app,storage,send):
             with store.transaction() as tx:
                 tx.enqueue(key,{'text':'SWING TEST 연결 테스트\n실제 매매 신호가 아닙니다.\n1시간봉 스윙 비교 알림 전용\n테스트 ID: swing-v17-'+now.date().isoformat(),'expires_at':(now+timedelta(seconds=180)).isoformat()})
             result={'delivery':drain(store,send,prefix=PREFIX,limit=12)}
+        elif fields.get('action',[''])[0]=='diagnostics':
+            result=diagnostics(store,now)
         else:
             with store.transaction() as tx:
                 result={'latest':tx.get(PREFIX+'latest'), 'banks':{i:tx.get(PREFIX+'bank:'+str(i)) for i in BANKS}, 'outbox':tx.execute("SELECT status,COUNT(*) FROM mf_outbox WHERE id LIKE ? GROUP BY status",(PREFIX+'%',)).fetchall()}
@@ -140,6 +150,39 @@ def install(app,storage,send):
     def bank_intake(data:dict,background_tasks:BackgroundTasks):
         authenticate(data.get('secret'))
         try: result=ingest_bank(storage(),data,datetime.now(timezone.utc))
-        except (ValueError,TypeError,OverflowError,KeyError): raise HTTPException(422,'Invalid swing bank event') from None
+        except (ValueError,TypeError,OverflowError,KeyError) as exc:
+            record_rejection(storage(),data,datetime.now(timezone.utc),exc)
+            raise HTTPException(422,'Invalid swing bank event') from None
         background_tasks.add_task(drain,storage(),send,limit=64,prefix=PREFIX)
         return result
+
+
+def record_rejection(store,data,now,exc):
+    # Authenticated validation failures only. Never save payloads, keys or exception text.
+    try:
+        with store.transaction() as tx:
+            bank=data.get('bank')
+            bank=bank if type(bank) is int and bank in BANKS else 'unknown'
+            key='swing-diagnostic:reject:'+now.date().isoformat()+':'+str(bank)
+            old=tx.get(key,{'count':0})
+            allowed={'event identity','event clock','stale bank','clock','health fields','health shape','wrong symbols','batch shape','bank identity','stale','event time','plan time','model identity','action','feed','price','schema or ticker','model'}
+            reason=str(exc) if str(exc) in allowed else 'invalid_payload'
+            tx.put(key,{'count':old['count']+1,'last_at':now.isoformat(),'type':type(exc).__name__,'reason':reason})
+    except Exception:
+        pass
+
+def diagnostics(store,now):
+    day=now.astimezone(ZoneInfo('America/New_York')).date().isoformat()
+    start=int(datetime.fromisoformat(day).replace(tzinfo=ZoneInfo('America/New_York')).timestamp()*1000)
+    end=start+86400000
+    with store.transaction() as tx:
+        hours=[json.loads(r[0]) for r in tx.execute("SELECT value FROM mf_kv WHERE key LIKE ?",('swing-diagnostic:hour:%',)).fetchall()]
+        hours=[v for v in hours if start<=v['bar_end_ms']<end]
+        rejected=[json.loads(r[0]) for r in tx.execute("SELECT value FROM mf_kv WHERE key LIKE ?",('swing-diagnostic:reject:'+day+':%',)).fetchall()]
+        events=[v for v in tx.events(day) if v.get('schema')=='mf.swing.compare.v1']
+        deliveries=[{'id':r[0],'status':r[1]} for r in tx.execute("SELECT id,status FROM mf_outbox WHERE id LIKE ?",(PREFIX+'%',)).fetchall()]
+        banks={i:tx.get(PREFIX+'bank:'+str(i)) for i in BANKS}
+    return {'day':day,'banks':banks,'hourly_receipts':hours,'authenticated_rejections':rejected,'trade_events':events,'deliveries':deliveries,
+        'limits':['Hourly receipt history starts with this diagnostic deployment; prior missing hours unknown.',
+                  'Legacy Pine health lacks gate reasons. ready=true is NOT proof that PLAN conditions passed.',
+                  'Authentication failures are not counted by this authenticated diagnostic path.']}

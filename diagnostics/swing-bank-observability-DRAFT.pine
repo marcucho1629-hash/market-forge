@@ -1,0 +1,491 @@
+// DIAGNOSTIC DRAFT: not compiled or installed. Decision expressions unchanged.
+//@version=6
+indicator("Market Forge Swing V1.8 BANK | 100 symbols", overlay=false, dynamic_requests=true)
+// Same V1.7 hourly paper models; 8 symbols per alert, 13 banks.
+// All symbols use SPY for the benchmark AND sector baseline, as in V1.7 live setup.
+bank = input.int(1, "Bank", minval=1, maxval=13)
+sendCompare = input.bool(false, "Send SWING TEST alerts")
+webhookKey = input.string("", "Webhook key (private)")
+compareRule = "1.5R"
+benchmark = "BATS:SPY"
+sector = "BATS:SPY"
+dayDirection = "NONE"
+dayStopHit = false
+minDollarVolume = 20000000.0
+minScore = 70
+feeBps = 1.0
+slipBps = 5.0
+borrowPct = 5.0
+if barstate.isfirst and (not chart.is_standard or not timeframe.isminutes or timeframe.multiplier != 60 or syminfo.session != session.regular)
+    runtime.error("Use standard SPY 1h Regular Trading Hours.")
+type Daily
+    float dc
+    float de20
+    float de50
+    float de200
+    float prev50
+    float drsi
+    float datr
+    float dv
+    float davg
+    float dollars
+    float resistance
+    float support
+    int dailyBars
+type Weekly
+    float wc
+    float we20
+    float wp20
+    int weeklyBars
+type FourHour
+    float hc
+    float he20
+    float hp20
+type ScanResult
+    string events
+    int ended
+    int closed0
+    int closed3
+    int entered0
+    int entered3
+    bool ready
+    int checked
+    int eligible
+    string diagnostic
+f_simCost(float ep, float xp, int side, int started, int ended) =>
+    executionCost = (ep + xp) * (feeBps + slipBps) / 10000.0
+    calendarDays = math.max(0.0, (ended-started) / 86400000.0)
+    borrowCost = side == -1 ? ep * borrowPct / 100.0 * calendarDays / 365.0 : 0.0
+    executionCost + borrowCost
+
+f_json(int model, string action, int side, float price, float stopPrice, float targetPrice, int eventTime, string reason) =>
+    horizon = model < 3 ? "2-5" : "5-10"
+    msg = '{"schema":"mf.swing.compare.v1","secret":"' + webhookKey + '","ticker":"' + syminfo.ticker + '","feed":"' + syminfo.tickerid + '","model":' + str.tostring(model) + ',"horizon":"' + horizon + '","room":"' + compareRule + '","action":"' + action + '","side":' + str.tostring(side) + ',"price":' + str.tostring(price,"#.########") + ',"stop":' + str.tostring(stopPrice,"#.########") + ',"target":' + str.tostring(targetPrice,"#.########") + ',"event_ms":' + str.tostring(eventTime) + ',"bar_end_ms":' + str.tostring(time_close) + ',"emitted_ms":' + str.tostring(timenow) + ',"reason":"' + reason + '"}'
+    msg
+
+f_core() =>
+    regularTicker = ticker.modify(syminfo.tickerid, session=session.regular)
+    dRaw = request.security(regularTicker, "D", Daily.new(close[1], ta.ema(close,20)[1], ta.ema(close,50)[1], ta.ema(close,200)[1], ta.ema(close,50)[2], ta.rsi(close,14)[1], ta.atr(14)[1], volume[1], ta.sma(volume,20)[1], ta.sma(close*volume,20)[1], ta.highest(high,20)[1], ta.lowest(low,20)[1], bar_index[1]), lookahead=barmerge.lookahead_on)
+    d = na(dRaw) ? Daily.new(na,na,na,na,na,na,na,na,na,na,na,na,na) : dRaw
+    dc = d.dc
+    de20 = d.de20
+    de50 = d.de50
+    de200 = d.de200
+    prev50 = d.prev50
+    drsi = d.drsi
+    datr = d.datr
+    dv = d.dv
+    davg = d.davg
+    dollars = d.dollars
+    resistance = d.resistance
+    support = d.support
+    dailyBars = d.dailyBars
+    wRaw = request.security(regularTicker, "W", Weekly.new(close[1], ta.ema(close,20)[1], ta.ema(close,20)[2], bar_index[1]), lookahead=barmerge.lookahead_on)
+    w = na(wRaw) ? Weekly.new(na,na,na,na) : wRaw
+    wc = w.wc
+    we20 = w.we20
+    wp20 = w.wp20
+    weeklyBars = w.weeklyBars
+    hRaw = request.security(regularTicker, "240", FourHour.new(close[1], ta.ema(close,20)[1], ta.ema(close,20)[2]), lookahead=barmerge.lookahead_on)
+    h = na(hRaw) ? FourHour.new(na,na,na) : hRaw
+    hc = h.hc
+    he20 = h.he20
+    hp20 = h.hp20
+    [mc, me50] = request.security(ticker.modify(benchmark, session=session.regular), "D", [close[1], ta.ema(close,50)[1]], lookahead=barmerge.lookahead_on)
+    [sc, se50] = request.security(ticker.modify(sector, session=session.regular), "D", [close[1], ta.ema(close,50)[1]], lookahead=barmerge.lookahead_on)
+
+    e20 = ta.ema(close,20)
+    e50 = ta.ema(close,50)
+    rsi = ta.rsi(close,14)
+    hatr = ta.atr(14)
+    volBase = ta.sma(volume,20)[1]
+    priorHigh = ta.highest(high,3)[1]
+    priorLow = ta.lowest(low,3)[1]
+
+    ready = dailyBars >= 199 and weeklyBars >= 19 and bar_index >= 49 and not na(de200) and not na(wp20) and not na(hp20) and not na(me50) and not na(se50) and not na(volBase) and datr > 0 and hatr > 0
+    liquid = ready and dollars >= minDollarVolume and dc >= 5
+    volOK = volume >= volBase * 1.15
+    dailyLong = dc > de20 and de20 > de50 and de50 >= prev50 and drsi >= 50
+    dailyShort = dc < de20 and de20 < de50 and de50 <= prev50 and drsi <= 50
+    weeklyLong = wc > we20 and we20 >= wp20
+    weeklyShort = wc < we20 and we20 <= wp20
+    fourLong = hc > he20 and he20 >= hp20
+    fourShort = hc < he20 and he20 <= hp20
+    marketLong = mc > me50 and sc > se50
+    marketShort = mc < me50 and sc < se50
+    timingLong = close > e20 and e20 > e50 and close > open and (close > priorHigh or (low <= e20 and close[1] <= e20[1])) and rsi >= 50 and rsi < 72
+    timingShort = close < e20 and e20 < e50 and close < open and (close < priorLow or (high >= e20 and close[1] >= e20[1])) and rsi <= 50 and rsi > 28
+    notChasing = math.abs(close - e20) <= hatr * 1.5 and math.abs(close - dc) <= datr * 2.0
+    longScore = (dailyLong ? 30 : 0) + (marketLong ? 20 : 0) + (timingLong ? 20 : 0) + (volOK ? 15 : 0) + (weeklyLong ? 10 : 0) + (dv >= davg ? 5 : 0)
+    shortScore = (dailyShort ? 30 : 0) + (marketShort ? 20 : 0) + (timingShort ? 20 : 0) + (volOK ? 15 : 0) + (weeklyShort ? 10 : 0) + (dv >= davg ? 5 : 0)
+
+    var array<int> sides = array.new_int(2,0)
+    var array<float> entries = array.new_float(2,na)
+    var array<float> stops = array.new_float(2,na)
+    var array<float> risks = array.new_float(2,na)
+    var array<float> targets = array.new_float(2,na)
+    var array<int> entrySessions = array.new_int(2,0)
+    var array<int> entryBars = array.new_int(2,0)
+    var array<int> exitBars = array.new_int(2,-100)
+    var array<string> assessment = array.new_string(2,"WARMUP / WAIT CLOSE")
+    var array<string> dayAssessment = array.new_string(2,"NOT REQUESTED")
+    var array<int> closedCounts = array.new_int(2,0)
+    var array<int> winCounts = array.new_int(2,0)
+    var array<float> totalR = array.new_float(2,0.0)
+    // Diagnostics never participate in entry or exit decisions.
+    var array<string> latestByHorizon = array.new_string(2,"No events")
+    var array<int> funnel = array.new_int(56,0)
+    var array<string> firstBlock = array.new_string(4,"WAIT CLOSE")
+    var int firstCheckedAt = na
+    // Shadow counters ignore portfolio slots; they do not change trading decisions.
+    var array<int> roomCounts = array.new_int(24,0)
+    var array<string> roomLastTime = array.new_string(4,"No candidates")
+    var array<string> roomLastPrice = array.new_string(4,"--")
+    var array<string> roomLastLevel = array.new_string(4,"--")
+    var array<string> roomLastR = array.new_string(4,"--")
+    var array<string> logs = array.new_string()
+    var int sessionCount = 0
+    var int lastSession = na
+    var int lastDecisionAt = na
+    var int checkedBars = 0
+
+    // Six isolated shadow portfolios: two horizons x three Room thresholds.
+    // Cost assumptions are estimates, not broker fees or a guarantee of borrow.
+    var array<int> simSide = array.new_int(6,0)
+    var array<float> simEntry = array.new_float(6,na)
+    var array<float> simStop = array.new_float(6,na)
+    var array<float> simRisk = array.new_float(6,na)
+    var array<float> simTarget = array.new_float(6,na)
+    var array<int> simSession = array.new_int(6,0)
+    var array<int> simBar = array.new_int(6,0)
+    var array<int> simStart = array.new_int(6,0)
+    var array<int> simExitBar = array.new_int(6,-100)
+    var array<int> simEntered = array.new_int(6,0)
+    var array<int> simClosed = array.new_int(6,0)
+    var array<int> simLongClosed = array.new_int(6,0)
+    var array<int> simShortClosed = array.new_int(6,0)
+    var array<int> simWins = array.new_int(6,0)
+    var array<int> simStopped = array.new_int(6,0)
+    var array<int> simTargeted = array.new_int(6,0)
+    var array<float> simGross = array.new_float(6,0.0)
+    var array<float> simCosts = array.new_float(6,0.0)
+    var array<float> simNet = array.new_float(6,0.0)
+    var array<float> simPeak = array.new_float(6,0.0)
+    var array<float> simDrawdown = array.new_float(6,0.0)
+    var array<float> simWorst = array.new_float(6,na)
+    var array<string> simLast = array.new_string(6,"No exits")
+    var array<float> simOpenNet = array.new_float(6,na)
+
+    // Audit-only data, never read by entry/exit logic.
+    var array<float> auditInitialStop = array.new_float(6,na)
+    var array<float> auditBestCloseR = array.new_float(6,0.0)
+    var array<int> auditReasons = array.new_int(30,0)
+    var array<int> auditKey = array.new_int()
+    var array<string> auditCells = array.new_string()
+
+    // 6 portfolios x (all entry years + 3 entry-year cohorts) x 2 directions.
+    // Aggregate only on exit; no effect on trading decisions or position continuity.
+    var array<int> splitCount = array.new_int(48,0)
+    var array<int> splitWins = array.new_int(48,0)
+    var array<float> splitGross = array.new_float(48,0.0)
+    var array<float> splitCost = array.new_float(48,0.0)
+    var array<float> splitNet = array.new_float(48,0.0)
+
+    // V1.6.1: plans are frozen at the signal close, evaluated at next available RTH open.
+    // The legacy two-slot engine above remains a CLOSE reference only, with alerts disabled.
+    var array<int> pendingSide = array.new_int(6,0)
+    var array<float> pendingStop = array.new_float(6,na)
+    var array<float> pendingTarget = array.new_float(6,na)
+    var array<float> pendingLevel = array.new_float(6,na)
+    var array<int> pendingBar = array.new_int(6,-1)
+    var array<string> pendingExit = array.new_string(6,"")
+    var array<int> planned = array.new_int(6,0)
+    var array<int> rejected = array.new_int(6,0)
+    var array<int> ambiguous = array.new_int(6,0)
+    var array<int> gapTargets = array.new_int(6,0)
+
+    string events = ""
+    if session.ismarket
+        if na(lastSession) or lastSession != time("D")
+            sessionCount += 1
+            lastSession := time("D")
+        if na(firstCheckedAt)
+            firstCheckedAt := time
+        lastDecisionAt := time_close
+        checkedBars += 1
+        for slot = 0 to 1
+            horizon = slot == 0 ? "2-5" : "5-10"
+            maxDays = slot == 0 ? 5 : 10
+            atrMultiple = slot == 0 ? 1.2 : 1.8
+            targetR = slot == 0 ? 2.0 : 2.5
+            side = array.get(sides,slot)
+            // Existing stop only. A new trailing stop applies on the NEXT bar.
+            if side != 0 and bar_index > array.get(entryBars,slot)
+                ep = array.get(entries,slot)
+                st = array.get(stops,slot)
+                tg = array.get(targets,slot)
+                risk = array.get(risks,slot)
+                daysHeld = sessionCount - array.get(entrySessions,slot) + 1
+                gapStop = side == 1 ? open <= st : open >= st
+                stopTouch = side == 1 ? low <= st : high >= st
+                targetTouch = side == 1 ? high >= tg : low <= tg
+                // Without ticks, if both levels touch we conservatively record stop first.
+                timedOut = daysHeld > maxDays or (daysHeld >= maxDays and session.islastbar_regular)
+                trendFail = ready and (side == 1 ? dc < de50 : dc > de50)
+                exitReason = gapStop ? "GAP_STOP" : stopTouch ? "STOP" : targetTouch ? "TARGET" : timedOut ? "TIME_EXIT" : trendFail ? "DAILY_TREND_FAIL" : ""
+                if exitReason != ""
+                    px = gapStop ? open : stopTouch ? st : targetTouch ? tg : close
+                    realizedR = side * (px-ep) / risk
+                    array.set(closedCounts,slot,array.get(closedCounts,slot)+1)
+                    array.set(winCounts,slot,array.get(winCounts,slot)+(realizedR > 0 ? 1 : 0))
+                    array.set(totalR,slot,array.get(totalR,slot)+realizedR)
+                    array.set(sides,slot,0)
+                    array.set(exitBars,slot,bar_index)
+                else if side * (close - ep) >= risk
+                    proposed = close - side * datr * atrMultiple
+                    array.set(stops,slot,side == 1 ? math.max(st,proposed) : math.min(st,proposed))
+
+            longContext = dailyLong and marketLong and (slot == 0 or (weeklyLong and fourLong and dc > de200))
+            shortContext = dailyShort and marketShort and (slot == 0 or (weeklyShort and fourShort and dc < de200))
+            longOK = liquid and notChasing and volOK and timingLong and longContext and longScore >= minScore
+            shortOK = liquid and notChasing and volOK and timingShort and shortContext and shortScore >= minScore
+            candidate = longOK ? 1 : shortOK ? -1 : 0
+            risk = datr * atrMultiple
+            // A nearby opposing 20-day extreme must leave at least 1.5R of room.
+            roomOK = candidate == 1 ? (resistance <= close or (resistance-close)/risk >= 1.5) : candidate == -1 ? (support >= close or (close-support)/risk >= 1.5) : false
+            if candidate != 0
+                roomGroup = slot * 2 + (candidate == 1 ? 0 : 1)
+                roomBase = roomGroup * 6
+                level = candidate == 1 ? resistance : support
+                // A level already reached/passed is exempt in the existing V1 rule.
+                passedLevel = candidate == 1 ? level <= close : level >= close
+                distanceR = candidate * (level-close) / risk
+                tests = array.from(true, passedLevel, roomOK, passedLevel or distanceR >= 1.0, passedLevel or distanceR >= 0.5, not roomOK)
+                for test = 0 to 5
+                    if array.get(tests,test)
+                        array.set(roomCounts,roomBase+test,array.get(roomCounts,roomBase+test)+1)
+                array.set(roomLastTime,roomGroup,str.format_time(time_close,"yyyy-MM-dd HH:mm","America/New_York"))
+                array.set(roomLastPrice,roomGroup,str.tostring(close,format.mintick))
+                array.set(roomLastLevel,roomGroup,str.tostring(level,format.mintick))
+                array.set(roomLastR,roomGroup,passedLevel ? "LEVEL PASSED / EXEMPT" : str.tostring(distanceR,"#.###") + " R")
+            reason = not ready ? "WARMUP / MISSING DATA" : not liquid ? "LIQUIDITY BLOCK" : not notChasing ? "CHASE BLOCK" : not (longContext or shortContext) ? "TREND CONFLICT / WAIT" : candidate == 0 ? "WAIT HOURLY TRIGGER" : not roomOK ? "INSUFFICIENT ROOM" : candidate == 1 ? "LONG TECHNICAL CANDIDATE" : "SHORT TECHNICAL CANDIDATE"
+            // Cumulative same-direction funnel: each row includes all preceding gates.
+            // Four independent groups: short horizon L/S, long horizon L/S.
+            gateNames = array.from("Data ready", "Liquidity", "Daily trend", "Market trend", "Sector trend", "Weekly/4h/EMA200", "No chase", "Hourly trigger", "Volume", "Score", "Room", "Slot available", "Positive plan prices")
+            for directionIndex = 0 to 1
+                d = directionIndex == 0 ? 1 : -1
+                groupIndex = slot * 2 + directionIndex
+                base = groupIndex * 14
+                directionRoom = d == 1 ? (resistance <= close or (resistance-close)/risk >= 1.5) : (support >= close or (close-support)/risk >= 1.5)
+                higherOK = slot == 0 or (d == 1 ? weeklyLong and fourLong and dc > de200 : weeklyShort and fourShort and dc < de200)
+                available = array.get(sides,slot) == 0 and bar_index > array.get(exitBars,slot)
+                positivePlan = close - d * risk > 0 and close + d * risk * targetR > 0
+                gates = array.from(ready, liquid, d == 1 ? dailyLong : dailyShort, d == 1 ? mc > me50 : mc < me50, d == 1 ? sc > se50 : sc < se50, higherOK, notChasing, d == 1 ? timingLong : timingShort, volOK, (d == 1 ? longScore : shortScore) >= minScore, directionRoom, available, positivePlan)
+                array.set(funnel,base,array.get(funnel,base)+1)
+                passes = true
+                block = "ALL PASS / ENTRY"
+                for gate = 0 to 12
+                    if passes and not array.get(gates,gate)
+                        block := array.get(gateNames,gate)
+                    passes := passes and array.get(gates,gate)
+                    if passes
+                        array.set(funnel,base+gate+1,array.get(funnel,base+gate+1)+1)
+                array.set(firstBlock,groupIndex,block)
+            array.set(assessment,slot,reason)
+            daySide = dayDirection == "LONG" ? 1 : dayDirection == "SHORT" ? -1 : 0
+            aligned = daySide == 1 ? longContext : daySide == -1 ? shortContext : false
+            conversion = daySide == 0 ? "NOT REQUESTED" : dayStopHit ? "BLOCKED: DAY STOP HIT" : not ready ? "UNKNOWN: DATA" : not aligned ? "DAY ONLY / TREND CONFLICT" : candidate == daySide and roomOK ? "CANDIDATE / EXTERNAL REVIEW" : "WATCH / NO SWING ENTRY"
+            array.set(dayAssessment,slot,conversion)
+            // Two independent horizon slots; no automatic conversion of a day position.
+            if array.get(sides,slot) == 0 and bar_index > array.get(exitBars,slot) and candidate != 0 and roomOK
+                st = close - candidate * risk
+                tg = close + candidate * risk * targetR
+                if st > 0 and tg > 0
+                    array.set(sides,slot,candidate)
+                    array.set(entries,slot,close)
+                    array.set(stops,slot,st)
+                    array.set(risks,slot,risk)
+                    array.set(targets,slot,tg)
+                    array.set(entrySessions,slot,sessionCount)
+                    array.set(entryBars,slot,bar_index)
+
+            // Read the same confirmed technical candidate, but manage each alternative independently.
+            for variant = 0 to 2
+                k = slot * 3 + variant
+                threshold = variant == 0 ? 1.5 : variant == 1 ? 1.0 : 0.5
+                // Only saved signal data and this bar's OPEN decide admission.
+                pd = array.get(pendingSide,k)
+                if pd != 0 and bar_index > array.get(pendingBar,k)
+                    ps = array.get(pendingStop,k)
+                    pt = array.get(pendingTarget,k)
+                    pl = array.get(pendingLevel,k)
+                    actualRisk = pd*(open-ps)
+                    remainingReward = pd*(pt-open)
+                    openRoom = actualRisk > 0 and (pd*(pl-open) <= 0 or pd*(pl-open)/actualRisk >= threshold)
+                    if array.get(simSide,k) == 0 and open > 0 and actualRisk >= syminfo.mintick and remainingReward > 0 and openRoom
+                        array.set(simSide,k,pd)
+                        array.set(simEntry,k,open)
+                        array.set(simStop,k,ps)
+                        array.set(simTarget,k,pt)
+                        array.set(simRisk,k,actualRisk)
+                        array.set(simSession,k,sessionCount)
+                        array.set(simBar,k,bar_index)
+                        array.set(simStart,k,time)
+                        array.set(auditInitialStop,k,ps)
+                        array.set(auditBestCloseR,k,0.0)
+                        array.set(simEntered,k,array.get(simEntered,k)+1)
+                        if k % 3 == 0
+                            events += (events == "" ? "" : ",") + f_json(k,"MODEL_ENTRY",pd,open,ps,pt,time,"NEXT_RTH_OPEN")
+                    else
+                        array.set(rejected,k,array.get(rejected,k)+1)
+                        if k % 3 == 0
+                            events += (events == "" ? "" : ",") + f_json(k,"REJECTED",pd,open,ps,pt,time,"OPEN_GATE")
+                    array.set(pendingSide,k,0)
+                sd = array.get(simSide,k)
+                // A fill at this bar's open is exposed to this bar's subsequent high/low.
+                if sd != 0 and bar_index >= array.get(simBar,k)
+                    epSim = array.get(simEntry,k)
+                    stSim = array.get(simStop,k)
+                    tgSim = array.get(simTarget,k)
+                    rSim = array.get(simRisk,k)
+                    heldSim = sessionCount-array.get(simSession,k)+1
+                    gapSim = sd == 1 ? open <= stSim : open >= stSim
+                    stopSim = sd == 1 ? low <= stSim : high >= stSim
+                    targetSim = sd == 1 ? high >= tgSim : low <= tgSim
+                    timeoutSim = heldSim > maxDays or (heldSim >= maxDays and session.islastbar_regular)
+                    trendSim = ready and (sd == 1 ? dc < de50 : dc > de50)
+                    gapTarget = sd == 1 ? open >= tgSim : open <= tgSim
+                    queuedExit = array.get(pendingExit,k)
+                    atOpen = gapSim or gapTarget or queuedExit != ""
+                    // Known open events precede unknown intrabar order. Target gap capped at target.
+                    reasonSim = gapSim ? "GAP_STOP" : gapTarget ? "GAP_TARGET" : queuedExit != "" ? queuedExit : stopSim ? "STOP" : targetSim ? "TARGET" : ""
+                    if not atOpen and stopSim and targetSim
+                        array.set(ambiguous,k,array.get(ambiguous,k)+1)
+                    if gapTarget
+                        array.set(gapTargets,k,array.get(gapTargets,k)+1)
+                    if reasonSim != ""
+                        exitSim = gapSim ? open : gapTarget ? tgSim : queuedExit != "" ? open : stopSim ? stSim : tgSim
+                        grossSim = sd * (exitSim-epSim)/rSim
+                        costSim = f_simCost(epSim,exitSim,sd,array.get(simStart,k),atOpen ? time : time_close)/rSim
+                        netSim = grossSim-costSim
+                        entryYear = int(str.tonumber(str.format_time(array.get(simStart,k),"yyyy","America/New_York")))
+                        cohort = entryYear <= 2022 ? 1 : entryYear <= 2024 ? 2 : 3
+                        for bucketPass = 0 to 1
+                            periodIndex = bucketPass == 0 ? 0 : cohort
+                            splitIndex = k*8+periodIndex*2+(sd == 1 ? 0 : 1)
+                            array.set(splitCount,splitIndex,array.get(splitCount,splitIndex)+1)
+                            array.set(splitWins,splitIndex,array.get(splitWins,splitIndex)+(netSim > 0 ? 1 : 0))
+                            array.set(splitGross,splitIndex,array.get(splitGross,splitIndex)+grossSim)
+                            array.set(splitCost,splitIndex,array.get(splitCost,splitIndex)+costSim)
+                            array.set(splitNet,splitIndex,array.get(splitNet,splitIndex)+netSim)
+                        cumulative = array.get(simNet,k)+netSim
+                        peakSim = math.max(array.get(simPeak,k),cumulative)
+                        array.set(simClosed,k,array.get(simClosed,k)+1)
+                        array.set(simLongClosed,k,array.get(simLongClosed,k)+(sd == 1 ? 1 : 0))
+                        array.set(simShortClosed,k,array.get(simShortClosed,k)+(sd == -1 ? 1 : 0))
+                        array.set(simWins,k,array.get(simWins,k)+(netSim > 0 ? 1 : 0))
+                        array.set(simStopped,k,array.get(simStopped,k)+((reasonSim == "GAP_STOP" or reasonSim == "STOP") ? 1 : 0))
+                        array.set(simTargeted,k,array.get(simTargeted,k)+((reasonSim == "TARGET" or reasonSim == "GAP_TARGET") ? 1 : 0))
+                        array.set(simGross,k,array.get(simGross,k)+grossSim)
+                        array.set(simCosts,k,array.get(simCosts,k)+costSim)
+                        array.set(simNet,k,cumulative)
+                        array.set(simPeak,k,peakSim)
+                        array.set(simDrawdown,k,math.max(array.get(simDrawdown,k),peakSim-cumulative))
+                        array.set(simWorst,k,na(array.get(simWorst,k)) ? netSim : math.min(array.get(simWorst,k),netSim))
+                        trailingExit = sd == 1 ? stSim > array.get(auditInitialStop,k) : stSim < array.get(auditInitialStop,k)
+                        reasonIndex = (reasonSim == "GAP_STOP" or reasonSim == "STOP") ? (trailingExit ? 1 : 0) : (reasonSim == "TARGET" or reasonSim == "GAP_TARGET") ? 2 : reasonSim == "TIME_EXIT" ? 3 : 4
+                        array.set(auditReasons,k*5+reasonIndex,array.get(auditReasons,k*5+reasonIndex)+1)
+                        auditReason = (reasonSim == "GAP_STOP" or reasonSim == "STOP") ? (gapSim ? "GAP / " : "") + (trailingExit ? "TRAIL STOP" : "INITIAL STOP") : reasonSim
+                        timeCell = str.format_time(array.get(simStart,k),"yyyy-MM-dd HH:mm","America/New_York") + "\n" + str.format_time(atOpen ? time : time_close,"yyyy-MM-dd HH:mm","America/New_York")
+                        planCell = str.tostring(epSim,format.mintick) + " / " + str.tostring(array.get(auditInitialStop,k),format.mintick) + "\n" + str.tostring(tgSim,format.mintick)
+                        outcomeCell = str.tostring(grossSim,"#.###") + " / " + str.tostring(costSim,"#.###") + "\n" + str.tostring(netSim,"#.###")
+                        auditRow = array.from(timeCell,(sd == 1 ? "LONG" : "SHORT") + " / " + str.tostring(heldSim),planCell,str.tostring(stSim,format.mintick) + " / " + str.tostring(exitSim,format.mintick),auditReason,outcomeCell,str.tostring(array.get(auditBestCloseR,k),"#.###"))
+                        array.unshift(auditKey,k)
+                        for auditColumn = 0 to 6
+                            array.unshift(auditCells,array.get(auditRow,6-auditColumn))
+                        if array.size(auditKey) > 600
+                            array.pop(auditKey)
+                            for auditColumn = 0 to 6
+                                array.pop(auditCells)
+                        array.set(simLast,k,str.format_time(atOpen ? time : time_close,"yyyy-MM-dd HH:mm","America/New_York") + " " + reasonSim)
+                        array.set(pendingExit,k,"")
+                        if k % 3 == 0
+                            events += (events == "" ? "" : ",") + f_json(k,"MODEL_EXIT",sd,exitSim,stSim,tgSim,atOpen ? time : time_close,auditReason)
+                        array.set(simSide,k,0)
+                        array.set(simExitBar,k,bar_index)
+                    else if sd * (close-epSim) >= rSim
+                        proposedSim = close-sd*datr*atrMultiple
+                        array.set(simStop,k,sd == 1 ? math.max(stSim,proposedSim) : math.min(stSim,proposedSim))
+                    // Close-based decisions schedule a market exit for NEXT RTH open.
+                    if array.get(simSide,k) != 0 and (timeoutSim or trendSim)
+                        array.set(pendingExit,k,timeoutSim ? "TIME_EXIT" : "DAILY_TREND_FAIL")
+                roomSim = candidate == 1 ? (resistance <= close or (resistance-close)/risk >= threshold) : candidate == -1 ? (support >= close or (close-support)/risk >= threshold) : false
+                if array.get(simSide,k) == 0 and bar_index > array.get(simExitBar,k) and candidate != 0 and roomSim
+                    stopNew = close-candidate*risk
+                    targetNew = close+candidate*risk*targetR
+                    if stopNew > 0 and targetNew > 0
+                        array.set(pendingSide,k,candidate)
+                        array.set(pendingStop,k,stopNew)
+                        array.set(pendingTarget,k,targetNew)
+                        array.set(pendingLevel,k,candidate == 1 ? resistance : support)
+                        array.set(pendingBar,k,bar_index)
+                        array.set(planned,k,array.get(planned,k)+1)
+                        if k % 3 == 0
+                            events += (events == "" ? "" : ",") + f_json(k,"PLAN",candidate,close,stopNew,targetNew,time_close,"NEXT_OPEN_PENDING")
+                activeSim = array.get(simSide,k)
+                openNetSim = activeSim == 0 ? na : (activeSim*(close-array.get(simEntry,k))-f_simCost(array.get(simEntry,k),close,activeSim,array.get(simStart,k),time_close))/array.get(simRisk,k)
+                array.set(simOpenNet,k,openNetSim)
+                if activeSim != 0
+                    auditCloseR = activeSim*(close-array.get(simEntry,k))/array.get(simRisk,k)
+                    array.set(auditBestCloseR,k,math.max(array.get(auditBestCloseR,k),auditCloseR))
+    string blocksJson = ""
+    for diagnosticIndex = 0 to 3
+        blocksJson += (diagnosticIndex == 0 ? "" : ",") + '"' + array.get(firstBlock,diagnosticIndex) + '"'
+    string funnelJson = ""
+    for diagnosticIndex = 0 to array.size(funnel)-1
+        funnelJson += (diagnosticIndex == 0 ? "" : ",") + str.tostring(array.get(funnel,diagnosticIndex))
+    diagnostic = '{"checked":' + str.tostring(checkedBars) + ',"first_blocks":[' + blocksJson + '],"funnel":[' + funnelJson + '],"plans_0":' + str.tostring(array.get(planned,0)) + ',"plans_3":' + str.tostring(array.get(planned,3)) + ',"core_events_present":' + (events != "" ? "true" : "false") + '}'
+    ScanResult.new(events,time_close,array.get(simClosed,0),array.get(simClosed,3),array.get(simEntered,0),array.get(simEntered,3),ready,checkedBars,array.get(funnel,1),diagnostic)
+
+list = switch bank
+    1 => "BATS:SPY,BATS:QQQ,BATS:NVDA,BATS:TSLA,BATS:AVGO,BATS:AMD,BATS:META,BATS:AAPL"
+    2 => "BATS:MSFT,BATS:AMZN,BATS:PLTR,BATS:PANW,BATS:SNDK,BATS:GOOG,BATS:RDDT,BATS:HOOD"
+    3 => "BATS:COIN,BATS:JPM,BATS:AXP,BATS:V,BATS:XOM,BATS:CVX,BATS:UNH,BATS:JNJ"
+    4 => "BATS:CAT,BATS:AVAV,BATS:TGT,BATS:SHOP,BATS:UAL,BATS:ENPH,BATS:DDOG,BATS:IREN"
+    5 => "BATS:ARM,BATS:ANET,BATS:IBM,BATS:QCOM,BATS:CRWD,BATS:SNOW,BATS:MSTR,BATS:CRCL"
+    6 => "BATS:ORCL,BATS:MRVL,BATS:DELL,BATS:TSM,BATS:LITE,BATS:NOW,BATS:CRM,BATS:GLW"
+    7 => "BATS:SMCI,BATS:ADBE,BATS:TWLO,BATS:NET,BATS:ASTS,BATS:MRNA,BATS:HPE,BATS:HIMS"
+    8 => "BATS:ON,BATS:WMT,BATS:NBIS,BATS:INTC,BATS:AAOI,BATS:MU,BATS:DIS,BATS:NFLX"
+    9 => "BATS:COST,BATS:BA,BATS:GS,BATS:BAC,BATS:UBER,BATS:AMAT,BATS:IWM,BATS:DIA"
+    10 => "BATS:XLK,BATS:XLF,BATS:XLE,BATS:XLV,BATS:XLI,BATS:XLY,BATS:XLP,BATS:XLU"
+    11 => "BATS:XLC,BATS:XLB,BATS:XLRE,BATS:TLT,BATS:GLD,BATS:SLV,BATS:GDX,BATS:LLY"
+    12 => "BATS:ABBV,BATS:MRK,BATS:PFE,BATS:HD,BATS:LOW,BATS:GE,BATS:RTX,BATS:LMT"
+    13 => "BATS:MS,BATS:C,BATS:WFC,BATS:PYPL"
+    => ""
+var table dash = table.new(position.top_right,5,10,border_width=1)
+string allEvents = ""
+string health = ""
+items = str.split(list,",")
+for i = 0 to array.size(items)-1
+    symbol = array.get(items,i)
+    raw = request.security(ticker.modify(symbol,session=session.regular), "60", f_core(), lookahead=barmerge.lookahead_off, calc_bars_count=10000)
+    result = na(raw) ? ScanResult.new("",0,0,0,0,0,false,0,0,"{}") : raw
+    valid = not na(result.ended) and result.ended == time_close
+    if valid and result.events != ""
+        allEvents += (allEvents == "" ? "" : ",") + result.events
+    health += (health == "" ? "" : ",") + '{"ticker":"' + str.replace_all(symbol,"BATS:","") + '","bar_end_ms":' + (na(result.ended) ? "0" : str.tostring(result.ended)) + ',"ready":' + (result.ready ? "true" : "false") + ',"valid_close":' + (valid ? "true" : "false") + ',"diagnostic":' + result.diagnostic + '}'
+    if barstate.islast
+        table.cell(dash,0,i+1,symbol)
+        table.cell(dash,1,i+1,(result.ready ? "READY " : "WARM ")+str.tostring(result.checked)+"/"+str.tostring(result.eligible))
+        table.cell(dash,2,i+1,str.tostring(result.entered0)+" / "+str.tostring(result.closed0))
+        table.cell(dash,3,i+1,str.tostring(result.entered3)+" / "+str.tostring(result.closed3))
+        table.cell(dash,4,i+1,valid ? "CURRENT" : "STALE")
+if barstate.islast
+    table.cell(dash,0,0,"SWING BANK "+str.tostring(bank))
+    table.cell(dash,1,0,sendCompare ? "WEBHOOK ON" : "OFF")
+    table.cell(dash,2,0,"2-5 entry/exit")
+    table.cell(dash,3,0,"5-10 entry/exit")
+    table.cell(dash,4,0,"Hourly data")
+if barstate.isconfirmed and barstate.isrealtime and session.ismarket and sendCompare and webhookKey != ""
+    payload = '{"schema":"mf.swing.bank.v1","secret":"' + webhookKey + '","bank":' + str.tostring(bank) + ',"emitted_ms":' + str.tostring(timenow) + ',"bar_end_ms":' + str.tostring(time_close) + ',"health":[' + health + '],"events":[' + allEvents + ']}'
+    alert(payload,alert.freq_once_per_bar_close)
