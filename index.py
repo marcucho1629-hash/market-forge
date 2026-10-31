@@ -613,3 +613,6 @@ install_v136_research(app, storage, send_telegram)
 # Swing comparison notifications are isolated from intraday paths.
 from scanner.swing_compare import install as install_swing_compare
 install_swing_compare(app, storage, send_telegram)
+
+from scanner.free_iex import install as install_free_iex
+install_free_iex(app, storage, send_telegram)
