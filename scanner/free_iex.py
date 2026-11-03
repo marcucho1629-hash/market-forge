@@ -171,7 +171,16 @@ def install(app,storage,send):
                     result={'enabled':action=='enable','updated_at':now.isoformat()};tx.put(PREFIX+'control',result)
             elif action=='run':result=worker(storage(),send,now)
             elif action=='status':
-                with storage().transaction() as tx:result={k:tx.get(PREFIX+k) for k in ('control','probe','status')}
+                with storage().transaction() as tx:
+                    result={k:tx.get(PREFIX+k) for k in ('control','probe','status')}
+                    day=now.astimezone(ET).date().isoformat()
+                    snap=tx.get(PREFIX+day+':snapshot',{})
+                    seed=tx.get(PREFIX+day+':seed',{})
+                    result['day']=day
+                    result['seed_counts']={s:len(seed.get(s,[])) for s in SYMBOLS}
+                    result['snapshot']={s:{'count':len(v.get('bars',[])),'last':v.get('bars',[])[-1] if v.get('bars') else None} for s,v in snap.get('symbols',{}).items()}
+                    result['report']=tx.get(PREFIX+day+':report')
+                    result['outbox_counts']=[list(r) for r in tx.execute('SELECT status, COUNT(*) FROM mf_outbox WHERE id LIKE ? GROUP BY status',(PREFIX+day+':%',)).fetchall()]
             else:raise HTTPException(400,'Unknown action')
         except DataError as exc:result={'status':'blocked','error':str(exc)}
         return '<meta charset="utf-8"><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre><a href="/free-iex">Back</a>'
