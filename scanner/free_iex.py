@@ -157,7 +157,7 @@ def worker(store,send,now):
 def install(app,storage,send):
     @app.get('/free-iex',response_class=HTMLResponse)
     def panel():
-        return '''<!doctype html><meta charset="utf-8"><h1>무료 IEX 5종목 테스트</h1><p>1분+2분 연구용 · Bigdata 없음 · 주문 없음</p><form method="post" action="/free-iex/control"><label>웹훅 키 <input type="password" name="secret" required></label><button name="action" value="status">상태 확인</button><button name="action" value="connect">IEX 및 Telegram 연결 테스트</button><button name="action" value="enable">테스트 알림 활성화</button><button name="action" value="disable">테스트 중지</button><button name="action" value="run">지금 점검</button></form>'''
+        return '''<!doctype html><meta charset="utf-8"><h1>무료 IEX 5종목 테스트</h1><p>1분+2분 연구용 · Bigdata 없음 · 주문 없음</p><form method="post" action="/free-iex/control"><label>웹훅 키 <input type="password" name="secret" required></label><button name="action" value="status">상태 확인</button><button name="action" value="audit">오늘 데이터 진단</button><button name="action" value="connect">IEX 및 Telegram 연결 테스트</button><button name="action" value="enable">테스트 알림 활성화</button><button name="action" value="disable">테스트 중지</button><button name="action" value="run">지금 점검</button></form>'''
     @app.post('/free-iex/control',response_class=HTMLResponse)
     async def control(request:Request):
         body=await request.body()
@@ -170,6 +170,20 @@ def install(app,storage,send):
                     if action=='enable' and not tx.get(PREFIX+'probe'):raise HTTPException(409,'First verify IEX connection')
                     result={'enabled':action=='enable','updated_at':now.isoformat()};tx.put(PREFIX+'control',result)
             elif action=='run':result=worker(storage(),send,now)
+            elif action=='audit':
+                day=now.astimezone(ET).date().isoformat()
+                with storage().transaction() as tx:snap=tx.get(PREFIX+day+':snapshot',{})
+                if not snap:result={'day':day,'error':'no_snapshot'}
+                else:
+                    start=datetime.fromisoformat(snap['session']['open'])
+                    end=min(now-timedelta(seconds=3),datetime.fromisoformat(snap['session']['close']))
+                    fresh=bars(start,end);changes=[]
+                    for symbol in SYMBOLS:
+                        incoming={r[1]:r for r in fresh[symbol]}
+                        for row in snap['symbols'][symbol]['bars']:
+                            if row[1] in incoming and incoming[row[1]]!=row:
+                                changes.append({'ticker':symbol,'saved':row,'current':incoming[row[1]]})
+                    result={'day':day,'read_only':True,'fresh_counts':{s:len(fresh[s]) for s in SYMBOLS},'revision_count':len(changes),'revisions':changes[:20],'would_block_with_existing_guard':bool(changes)}
             elif action=='status':
                 with storage().transaction() as tx:
                     result={k:tx.get(PREFIX+k) for k in ('control','probe','status')}
