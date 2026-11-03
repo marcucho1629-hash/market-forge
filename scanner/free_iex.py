@@ -103,6 +103,12 @@ def stage(tx,report,now,day,telegram):
         tx.put(ident,{'status':status,'observed_at':now.isoformat(),'event':ev})
     return queued
 
+def freeze_observed(prior_rows,incoming):
+    revisions=[{'bar_end_ms':t,'observed':r,'revised':incoming[t]} for t,r in prior_rows.items() if t in incoming and incoming[t]!=r]
+    # Preserve the data actually used for decisions; corrections must not halt other symbols.
+    incoming.update(prior_rows)
+    return revisions
+
 def worker(store,send,now):
     lease=str(uuid.uuid4())
     with store.transaction() as tx:
@@ -127,24 +133,24 @@ def worker(store,send,now):
                     with store.transaction() as tx:tx.put(PREFIX+day+':seed',seed)
                 current=bars(opened,end)
                 with store.transaction() as tx:previous=tx.get(PREFIX+day+':snapshot')
-                ignored={s:[] for s in SYMBOLS}
+                ignored={s:[] for s in SYMBOLS};revisions={s:[] for s in SYMBOLS}
                 if previous:
                     for symbol in SYMBOLS:
                         saved=previous['symbols'][symbol]
                         prior_rows={r[1]:r for r in saved['bars']}
                         incoming={r[1]:r for r in current[symbol]}
-                        if any(t in incoming and incoming[t]!=r for t,r in prior_rows.items()):raise DataError('iex_completed_bar_revision')
+                        revisions[symbol]=freeze_observed(prior_rows,incoming)
                         ignored[symbol]=saved.get('ignored_backfills',[])+[t for t in incoming if t not in prior_rows and t<max(prior_rows,default=0)]
                         prior_rows.update(incoming);current[symbol]=[prior_rows[t] for t in sorted(prior_rows)]
                 snapshot={'day':day,'session':{'open':opened.isoformat(),'close':closed.isoformat()},'events':[],
-                          'symbols':{s:{'bars':current[s],'seed_bars':seed[s],'ignored_backfills':ignored[s]} for s in SYMBOLS}}
+                          'symbols':{s:{'bars':current[s],'seed_bars':seed[s],'ignored_backfills':ignored[s],'latest_revisions':revisions[s]} for s in SYMBOLS}}
                 report=comparison.compare(snapshot)
                 with store.transaction() as tx:
                     active=tx.get(PREFIX+'control',{}).get('enabled')
                     queued=stage(tx,report,utc(),day,active)
                     tx.put(PREFIX+day+':snapshot',snapshot)
                     tx.put(PREFIX+day+':report',report)
-                result={'status':'scanned','day':day,'counts':{s:len(current[s]) for s in SYMBOLS},'queued':queued}
+                result={'status':'scanned','day':day,'counts':{s:len(current[s]) for s in SYMBOLS},'queued':queued,'revision_counts':{s:len(revisions[s]) for s in SYMBOLS}}
         result.update(at=now.isoformat(),feed='iex',symbols=list(SYMBOLS),news_calls=0)
         with store.transaction() as tx:tx.put(PREFIX+'status',result);tx.put(PREFIX+'lease',{})
         result['delivery']=drain(store,send,prefix=PREFIX,now=utc())
