@@ -163,7 +163,7 @@ def worker(store,send,now):
 def install(app,storage,send):
     @app.get('/free-iex',response_class=HTMLResponse)
     def panel():
-        return '''<!doctype html><meta charset="utf-8"><h1>무료 IEX 5종목 테스트</h1><p>1분+2분 연구용 · Bigdata 없음 · 주문 없음</p><form method="post" action="/free-iex/control"><label>웹훅 키 <input type="password" name="secret" required></label><button name="action" value="status">상태 확인</button><button name="action" value="audit">오늘 데이터 진단</button><button name="action" value="connect">IEX 및 Telegram 연결 테스트</button><button name="action" value="enable">테스트 알림 활성화</button><button name="action" value="disable">테스트 중지</button><button name="action" value="run">지금 점검</button></form>'''
+        return '''<!doctype html><meta charset="utf-8"><h1>무료 IEX 5종목 테스트</h1><p>1분+2분 연구용 · Bigdata 없음 · 주문 없음</p><form method="post" action="/free-iex/control"><label>웹훅 키 <input type="password" name="secret" required></label><button name="action" value="status">상태 확인</button><button name="action" value="audit">오늘 데이터 진단</button><button name="action" value="export_audit">11월 2~3일 저장 기록 조회</button><button name="action" value="connect">IEX 및 Telegram 연결 테스트</button><button name="action" value="enable">테스트 알림 활성화</button><button name="action" value="disable">테스트 중지</button><button name="action" value="run">지금 점검</button></form>'''
     @app.post('/free-iex/control',response_class=HTMLResponse)
     async def control(request:Request):
         body=await request.body()
@@ -190,6 +190,19 @@ def install(app,storage,send):
                             if row[1] in incoming and incoming[row[1]]!=row:
                                 changes.append({'ticker':symbol,'saved':row,'current':incoming[row[1]]})
                     result={'day':day,'read_only':True,'fresh_counts':{s:len(fresh[s]) for s in SYMBOLS},'revision_count':len(changes),'revisions':changes[:20],'would_block_with_existing_guard':bool(changes)}
+            elif action=='export_audit':
+                # Authenticated read-only export; no API, engine, outbox mutation or delivery.
+                days=('2026-11-02','2026-11-03')
+                with storage().transaction() as tx:
+                    control_keys=['research136live:control','chart-news-control']+['mf'+str(v)+'-control' for v in range(130,136)]+[PREFIX+'control']
+                    result={'controls':{k:tx.get(k) for k in control_keys},'days':{}}
+                    for day in days:
+                        kv={}
+                        for pattern in (PREFIX+day+':%','research139recovery:'+day+':%','swing-diagnostic:hour:%','swing-diagnostic:reject:'+day+':%'):
+                            for key,value in tx.execute('SELECT key,value FROM mf_kv WHERE key LIKE ?',(pattern,)).fetchall():
+                                kv[key]=json.loads(value)
+                        result['days'][day]={'kv':kv,'events':tx.events(day)}
+                    result['outbox']=[{'id':r[0],'status':r[1],'payload':json.loads(r[2])} for r in tx.execute('SELECT id,status,payload FROM mf_outbox').fetchall()]
             elif action=='status':
                 with storage().transaction() as tx:
                     result={k:tx.get(PREFIX+k) for k in ('control','probe','status')}
