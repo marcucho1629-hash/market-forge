@@ -616,3 +616,7 @@ install_swing_compare(app, storage, send_telegram)
 
 from scanner.free_iex import install as install_free_iex
 install_free_iex(app, storage, send_telegram)
+
+# Independent pre-open WATCHLIST; no changes to existing entry/exit routes.
+from scanner.preopen.runtime import install as install_preopen_watch
+install_preopen_watch(app, storage, send_telegram)
