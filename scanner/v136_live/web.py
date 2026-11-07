@@ -8,6 +8,11 @@ from fastapi import Request, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from . import runtime, launch_shadow
 
+def auto_shadow_enabled():
+    """Only explicit 'true' opts into expensive per-webhook full-session replay."""
+    return os.getenv("MF_V136_AUTO_SHADOW", "").strip().lower() == "true"
+
+
 def auth(value):
     secret=os.getenv('CHART_NEWS_WEBHOOK_SECRET') or os.getenv('TRADINGVIEW_WEBHOOK_SECRET','')
     if not secret or not isinstance(value,str) or not hmac.compare_digest(value,secret):
@@ -21,7 +26,11 @@ def install(app,storage,send):
             now=datetime.now(timezone.utc)
             result=runtime.ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now)
             background_tasks.add_task(launch_shadow.deliver_and_record,storage(),send,now)
-            if result.get("accepted",0)>0:
+            # Full-session Shadow replay reads many DB rows per webhook.
+            # Explicit opt-in only; use the existing authenticated 'shadow_run'
+            # control for a one-off replay when this is disabled.
+            # This never changes ingest() or Telegram delivery.
+            if auto_shadow_enabled() and result.get("accepted", 0) > 0:
                 background_tasks.add_task(launch_shadow.capture,storage(),now,data.get("emitted"))
             return result
         except (ValueError,TypeError,KeyError,OverflowError):
