@@ -21,7 +21,12 @@ def install(app,storage,send):
             now=datetime.now(timezone.utc)
             result=runtime.ingest(storage(),{k:v for k,v in data.items() if k!='secret'},now)
             background_tasks.add_task(launch_shadow.deliver_and_record,storage(),send,now)
-            if result.get("accepted",0)>0:
+            # Full-session Shadow replay reads many DB rows per webhook.
+            # Explicit opt-in only; use the existing authenticated 'shadow_run'
+            # control for a one-off replay when this is disabled.
+            # This never changes ingest() or Telegram delivery.
+            auto_shadow = os.getenv("MF_V136_AUTO_SHADOW", "").strip().lower() == "true"
+            if auto_shadow and result.get("accepted", 0) > 0:
                 background_tasks.add_task(launch_shadow.capture,storage(),now,data.get("emitted"))
             return result
         except (ValueError,TypeError,KeyError,OverflowError):
