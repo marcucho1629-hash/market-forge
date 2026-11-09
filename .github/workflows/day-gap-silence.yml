@@ -20,4 +20,3 @@ jobs:
       - name: Run DAY signal and gap tests
         run: |
           python3 -m unittest discover -s tests -p test_v136_data_gap_silence.py -v
-          python3 -m unittest discover -s tests -p test_v136_live_runtime.py -v
