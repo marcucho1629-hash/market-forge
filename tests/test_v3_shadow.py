@@ -45,6 +45,17 @@ class ShadowChecks(unittest.TestCase):
         e.on_bar(bar(31, 100, 100.2, 98.7, 99), REF)
         self.assertEqual(e.on_bar(bar(33, 99, 99.3, 98.6, 98.9), REF)[0]["event"], "DATA_HALT")
 
+    def test_premarket_cannot_start_or_block_rth_candidate(self):
+        # Extended-hours candles are not submitted to the regular-session gate.
+        # An overnight gap is context, not automatically a chase rejection.
+        e = Engine()
+        pre = Bar("TEST", datetime(2026, 11, 6, 9, 29, tzinfo=ET),
+                  103, 103.2, 101, 102, 250)
+        self.assertEqual(e.on_bar(pre, REF), [])
+        watch = e.on_bar(bar(31, 100, 100.2, 98.7, 99), REF)
+        self.assertEqual(watch[0]["event"], "WATCH")
+        self.assertEqual(watch[0]["gap_atr_context"], -25)
+
     def test_no_second_event_or_duplicate(self):
         e = Engine()
         e.on_bar(bar(31, 100, 100.2, 98.7, 99), REF)
