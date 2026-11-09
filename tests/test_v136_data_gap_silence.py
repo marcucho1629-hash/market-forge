@@ -1,4 +1,5 @@
 """Regression tests: data-gap diagnostics stay active, Telegram remains quiet."""
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -88,7 +89,7 @@ class DayGapSilence(unittest.TestCase):
             ).fetchall()
             self.assertEqual(len(queued), 1)
             self.assertEqual(queued[0][1], "pending")
-            self.assertIn("확정봉 충돌", queued[0][2])
+            self.assertIn("확정봉 충돌", json.loads(queued[0][2])["text"])
 
 
 if __name__ == "__main__":
