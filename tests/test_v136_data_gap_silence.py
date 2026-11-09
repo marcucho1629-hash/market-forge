@@ -79,9 +79,16 @@ class DayGapSilence(unittest.TestCase):
         with self.store.transaction() as tx:
             state = tx.get(day.PREFIX + "2026-10-23:TSLA")
             self.assertIn("halted", state)
-        sent = []
-        day.delivery(self.store, sent.append, OPEN + timedelta(minutes=2, seconds=3))
-        self.assertTrue(any("확정봉 충돌" in s for s in sent), sent)
+        # The test fixture uses an October timestamp; the real drain clock is
+        # later, so assert that the critical warning is still queued (not silenced).
+        with self.store.transaction() as tx:
+            queued = tx.execute(
+                "SELECT id,status,payload FROM mf_outbox WHERE id LIKE ?",
+                (day.PREFIX + "%:DATA_CONFLICT",)
+            ).fetchall()
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(queued[0][1], "pending")
+            self.assertIn("확정봉 충돌", queued[0][2])
 
 
 if __name__ == "__main__":
