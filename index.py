@@ -620,3 +620,7 @@ install_free_iex(app, storage, send_telegram)
 # Independent pre-open WATCHLIST; no changes to existing entry/exit routes.
 from scanner.preopen.runtime import install as install_preopen_watch
 install_preopen_watch(app, storage, send_telegram)
+
+# Isolated IEX-only intraday research WATCH. DAY/Swing preserved.
+from scanner.intraday_v3 import install as install_intraday_v3
+install_intraday_v3(app, storage, send_telegram)

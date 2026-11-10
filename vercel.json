@@ -1,1 +1,8 @@
-{}
+{
+  "crons": [
+    {
+      "path": "/scanner/intraday-v3/worker",
+      "schedule": "2-57/5 14-20 * * 1-5"
+    }
+  ]
+}

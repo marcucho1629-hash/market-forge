@@ -14,7 +14,7 @@ ET = ZoneInfo("America/New_York")
 MIN_RTH_BARS = 60
 MIN_IEX_RTH_NOTIONAL = 5_000_000
 MIN_CONTEXT_SCORE = 65
-MAX_PER_SIDE = 5
+MAX_PER_SIDE = 10
 
 
 def _ema(closes, period):

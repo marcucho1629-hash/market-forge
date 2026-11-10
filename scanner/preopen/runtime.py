@@ -152,7 +152,7 @@ def message(report, now):
     counts = ctx.get('quality_counts', {})
     lines += ['', f'V2 전일 정규장 관찰 후보 {len(prior_picks)}종목 · IEX · 장전 미검증']
     if prior_picks:
-        visible = prior_picks if not report['selected'] else prior_picks[:4]
+        visible = prior_picks[:20] if len(report["selected"]) <= 10 else prior_picks[:10]
         for p in visible:
             direction = '상승관찰' if p['direction'] == 'BULLISH' else '하락관찰'
             lines += [f'{p["ticker"]} {direction} · 전일 {p["prior_date"]} · USD {p["prior_close"]:.2f} · 참고점수 {p["score"]}/100']
