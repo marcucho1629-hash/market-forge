@@ -47,6 +47,24 @@ def evaluate(tx,ticker,action,now,allow_off=True):
     if cfg.get("enabled") is False and allow_off:
         return dict(allow=True,reason="operator_disabled")
     day=now.astimezone(ET).date().isoformat()
+    # 07:30-07:59 MT: the authenticated 07:20 WATCH Top 10 is the only
+    # published scanner list. Never substitute this prior-RTH research context
+    # after the 08:00 MT intraday recheck starts.
+    from zoneinfo import ZoneInfo
+    local=now.astimezone(ZoneInfo("America/Denver"))
+    if local.hour==7 and local.minute>=30:
+        pre=tx.get("preopen-watch-v1:"+day+":report",{})
+        if pre.get("day")!=day:
+            return dict(allow=False,reason="missing_0720_watch")
+        rows=(pre.get("prior_rth_context",{}).get("selected",[])
+              or pre.get("selected",[]))
+        expected="BULLISH" if action=="MC" else "BEARISH"
+        matching=[r for r in rows if isinstance(r,dict) and r.get("direction")==expected]
+        if len(matching)>10:
+            return dict(allow=False,reason="invalid_0720_rank")
+        permitted=any(r.get("ticker")==ticker for r in matching)
+        return dict(allow=permitted,reason="matched_0720_watch" if permitted else "not_in_0720_watch",
+                    asof=pre.get("cutoff"),data_note="prior_session_context_not_same_day_confirmed")
     snap=tx.get(PREFIX+day+":latest",{})
     if not snap or snap.get("day")!=day or snap.get("mode")!="WATCH_ONLY":
         return dict(allow=False,reason="missing_current_day_snapshot")
