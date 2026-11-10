@@ -119,7 +119,9 @@ def build_report(store, day, cutoff, c):
     # Separate earlier RTH context is never marked as a V1 premarket technical pass.
     prior_context = research_report(prior_seed, day, c['symbols'])
     return dict(day=day, mode='RESEARCH_WATCH_ONLY', cutoff=cutoff.isoformat(), config_hash=config_hash(c),
-                quality_counts=dict(Counter(r['quality'] for r in rows)), rows=rows, selected=rank(rows,c),
+                quality_counts=dict(Counter(r['quality'] for r in rows)),
+                quality_reason_counts=dict(Counter(reason for r in rows for reason in r.get('reasons', []))),
+                rows=rows, selected=rank(rows,c),
                 prior_rth_context=prior_context,
                 news_calls=0, feed='iex', strict_minute_pass=sum(r.get('strict_minute_policy_pass',False) for r in rows))
 
@@ -131,6 +133,10 @@ def message(report, now):
              f'조회 {len(report["rows"])}종목 · 선정 {len(report["selected"])}종목',
              '데이터: '+', '.join(f'{k} {v}' for k,v in report['quality_counts'].items()),
              f'발송 {now.astimezone(DENVER):%H:%M:%S} MT'+(' · DELAYED' if now > stamp(report['cutoff'])+timedelta(minutes=1) else '')]
+    reasons = report.get('quality_reason_counts', {})
+    if reasons:
+        reasons_top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:4]
+        lines += ['주요 미통과 사유: ' + ', '.join(f'{name} {n}' for name, n in reasons_top)]
     for r in report['selected']:
         direction = '상승' if r['direction']=='BULLISH' else '하락'
         lines += ['', f'{r["ticker"]} {direction} WATCH · {r["score"]}/100 ({r["grade"]}) · ${r["price"]:.2f}',
@@ -138,7 +144,7 @@ def message(report, now):
                   f'Chase PASS · RVOL UNKNOWN · {r["quality"]}',
                   f'기준봉 {stamp(r["data_end"]).astimezone(DENVER):%H:%M} MT · 눌림/돌파 관찰',
                   f'구조 무효화 참고 ${r["structural_stop"]:.2f} · 실제 진입 NOT YET']
-    if not report['selected']: lines += ['', '장전 검증 통과 후보 0개. 데이터 부족와 기술 조건 탈락을 분리 기록.']
+    if not report['selected']: lines += ['', '장전 검증 통과 후보 0개. 데이터 부족과 기술 조건 탈락을 분리 기록.']
     # V2: prior RTH research context is never promoted to a premarket candidate
     # or a trading signal. The message identifies the distinct session.
     ctx = report.get('prior_rth_context', {})
