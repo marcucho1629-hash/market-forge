@@ -3,6 +3,7 @@ import html,hmac,json,os,uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime,timedelta
+from math import log10
 from urllib.parse import parse_qs
 from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse
@@ -27,6 +28,30 @@ def ema(xs,n):
 def change(xs,n=6):
     return 100*(xs[-1]/xs[-1-n]-1) if len(xs)>n and xs[-1-n] else None
 
+def structure_metrics(bars,true_ranges):
+    """Bounded observed-bar chop: no synthetic bars and no future information.
+
+    For the first 30–65min, use the observed 6–13 bar window. From bar 14,
+    use a standard rolling 14-bar Choppiness Index. Thresholds are research
+    heuristics pending multi-session validation.
+    """
+    n=min(14,len(bars))
+    recent=bars[-n:]
+    overall=max(r["h"] for r in recent)-min(r["l"] for r in recent)
+    total_tr=sum(true_ranges[-n:])
+    ratio=max(1.0,total_tr/overall) if overall>0 else float("inf")
+    chop=100*log10(ratio)/log10(n) if n>=2 and ratio!=float("inf") else 100.
+    closes=[r["c"] for r in recent]
+    deltas=[next_-prev for prev,next_ in zip(closes,closes[1:])]
+    path=sum(abs(d) for d in deltas)
+    efficiency=abs(closes[-1]-closes[0])/path if path else 0.
+    signs=[1 if d>0 else -1 if d<0 else 0 for d in deltas]
+    signs=[s for s in signs if s]
+    reversals=sum(a!=b for a,b in zip(signs,signs[1:]))
+    choppy=(chop>=61.8 or (efficiency<.30 and reversals>=3))
+    return dict(choppiness=round(chop,1),efficiency_ratio=round(efficiency,3),
+                trend_reversals=reversals,structure_bars=n,choppy=choppy)
+
 def evaluate(sym,bars,opened,end,spy_move=None):
     """Only validated completed native IEX 5m bars; absent intervals stay absent."""
     r=dict(ticker=sym,direction="NEUTRAL",quality="INSUFFICIENT",reason="no_bars",
@@ -49,6 +74,10 @@ def evaluate(sym,bars,opened,end,spy_move=None):
         previous=x["c"]
     atr=sum(tr[-14:])/min(14,len(tr))
     if atr<=0:return r|dict(quality="INVALID",reason="atr_zero")
+    structure=structure_metrics(b,tr)
+    r.update(structure)
+    if structure["choppy"]:
+        return r|dict(quality="READY",score=0,reason="choppy_chart")
     price=closes[-1];vwap=sum(x["vw"]*x["v"] for x in b)/sum(x["v"] for x in b)
     slope=e9[-1]-e9[-4]
     direction=1 if price>vwap and e9[-1]>e21[-1] and slope>0 else -1 if price<vwap and e9[-1]<e21[-1] and slope<0 else 0
@@ -56,7 +85,20 @@ def evaluate(sym,bars,opened,end,spy_move=None):
              direction="BULLISH" if direction==1 else "BEARISH" if direction==-1 else "NEUTRAL")
     if not direction:return r|dict(score=0,reason="direction_conflict")
     d=direction;impulse=d*(price-closes[-4])/atr;egap=d*(price-e9[-1])/atr;vgap=d*(price-vwap)/atr
-    chase="HIGH" if impulse>3.0 or (egap>2.2 and vgap>4.5) else "MED" if egap>1.3 or vgap>3.0 or impulse>1.8 else "LOW"
+    # A strong trend is not automatically a safe *entry* after the move.
+    # Require a new setup rather than chasing price far beyond the prior 20m
+    # range, EMA9 or session VWAP. Symmetric for bearish short candidates.
+    preceding=b[-5:-1]
+    prior_edge=max(x["h"] for x in preceding) if d>0 else min(x["l"] for x in preceding)
+    breakout_extension=max(0.,d*(price-prior_edge)/atr)
+    session_extension=d*(price-b[0]["o"])/atr
+    late_chase=(egap>1.4 and vgap>2.1
+                or impulse>2.25 and egap>1.0
+                or breakout_extension>1.25 and egap>1.1
+                or session_extension>8.0 and egap>.8 and vgap>2.0)
+    chase=("HIGH" if late_chase or impulse>3.0 or (egap>2.2 and vgap>4.5)
+           else "MED" if egap>1.3 or vgap>3.0 or impulse>1.8
+           else "LOW")
     vbase=sum(x["v"] for x in b[-6:-3]);vr=sum(x["v"] for x in b[-3:])/vbase if vbase else 0
     hi=max(x["h"] for x in b[-6:]);lo=min(x["l"] for x in b[-6:])
     pos=(price-lo)/(hi-lo) if hi>lo else .5
@@ -73,8 +115,13 @@ def evaluate(sym,bars,opened,end,spy_move=None):
     r.update(score=score,points=points,chase=chase,atr=round(atr,4),
              relative_spy_pct=round(rel,3) if rel is not None else None,
              volume_ratio=round(vr,2),extension_ema_atr=round(egap,2),
-             extension_vwap_atr=round(vgap,2),eligible=eligible,
-             reason="qualified" if eligible else "chase_block" if chase=="HIGH" else "score_below_minimum")
+             extension_vwap_atr=round(vgap,2),
+             breakout_extension_atr=round(breakout_extension,2),
+             session_extension_atr=round(session_extension,2),
+             late_chase=late_chase,eligible=eligible,
+             reason=("qualified" if eligible else "late_chase" if late_chase
+                     else "chase_block" if chase=="HIGH"
+                     else "score_below_minimum"))
     return r
 
 def select(rows):
@@ -99,7 +146,8 @@ def compare(previous,selected,rows):
         new_side=candidate.get("direction","NEUTRAL")
         state=("FLIP_WATCH" if new_side not in ("NEUTRAL",side) else
                "DATA_UNAVAILABLE" if candidate.get("quality") in ("INVALID","INSUFFICIENT") else
-               "CHASE" if reason=="chase_block" else
+               "CHOPPY" if reason=="choppy_chart" else
+               "CHASE" if reason in ("chase_block","late_chase") else
                "WEAKNESS" if reason in ("direction_conflict","score_below_minimum") else "REMOVE")
         removed.append(dict(ticker=sym,previous=side,status=state,reason=reason))
     return states,removed
@@ -117,6 +165,11 @@ def message(report):
             lines.append(f'{p["ticker"]} {p["score"]:.1f} · {state} · USD {p["price"]:.2f} · CHASE {p["chase"]}')
         if not picks:lines.append("기준 통과 종목 없음")
         lines.append("")
+    breakdown=report.get("quality_counts",{})
+    lines.append("제외: CHOPPY "+str(breakdown.get("choppy_chart",0))+
+                 " · LATE_CHASE "+str(breakdown.get("late_chase",0))+
+                 " · 기타 추격 "+str(breakdown.get("chase_block",0)))
+    lines.append("기준 통과 종목만 선정 · Top 10 강제 충원 없음")
     removed=report["removed"]
     lines.append(f"7:20/직전 시각 후보 제외·약화 {len(removed)}종목")
     for p in removed[:12]:lines.append(p["ticker"]+" "+p["status"])
