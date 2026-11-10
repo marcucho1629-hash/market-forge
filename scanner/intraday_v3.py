@@ -233,6 +233,16 @@ def worker(store,send,now):
                       spy_recent_change_pct=round(spy_move,3) if spy_move is not None else None,
                       feed="iex",mode="WATCH_ONLY",bigdata_calls=0,orders=0)
             tx.put(prefix+"latest",snap)
+            # Immutable decision-time ledger for next-day 3m Shadow comparison.
+            # Store only already-observed watch candidates, not all 150 rows.
+            # Never retroactively evaluate a 3m event with a later watchlist.
+            if day == "2026-11-11":
+                tx.put(prefix+"timeline:"+str(bucket),{
+                    "observed_at":now.isoformat(),"bar_cutoff":end.isoformat(),
+                    "selected":[{k:p.get(k) for k in
+                                  ("ticker","direction","score","chase","eligible","choppy","late_chase")}
+                                 for p in chosen],
+                    "ready_count":snap["ready_count"],"feed":"IEX_5M"})
             tx.put(prefix+"done:"+str(bucket),dict(at=now.isoformat(),ready_count=snap["ready_count"]))
             hour_key=prefix+"hour:"+str(local.hour)
             should_send=tx.get(hour_key) is None
