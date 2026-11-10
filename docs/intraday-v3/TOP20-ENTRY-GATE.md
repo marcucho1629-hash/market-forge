@@ -4,7 +4,8 @@ Scope: only newly generated MC for current Bullish Top 10, and newly generated S
 
 - Applies immediately before Telegram transport, using the latest *current-day* Intraday V3 snapshot refreshed on the 5-minute cadence.
 - Gate requires snapshot freshness <=11 minutes, bar-cutoff freshness <=16 minutes, and current candidate eligible=true, chase not HIGH, correct ticker and direction.
-- Fail closed if snapshot is stale, missing or inconsistent. This avoids outside-Top10 alerts but may yield zero MC/SCMP during an outage. Previous-day V2 candidates are never substituted.
+- During 07:30–07:59 MT only, use the current day's 07:20 list: the V2 prior-RTH WATCH picks (or V1 verified picks). Those are **prior-day research context, not same-day verified trade entries**. From 08:00 MT onward, use only the refreshed Intraday V3 5-minute snapshot.
+- Fail closed from 08:00 MT if snapshot is stale, missing or inconsistent. This avoids outside-Top10 alerts but may yield zero MC/SCMP during an outage. Previous-day V2 candidates are never substituted after 08:00.
 - X, SX, HX, DATA_CONFLICT, existing confirmation/cancel/status messages, and all unrelated Swing or Pre-Open messages remain unaffected.
 - Outbox entries blocked by this gate are marked filtered_top20, not sent; legacy direct webhook reports filtered_top20 as status.
 - Enabled by default. Authenticated /intraday-v3 panel, with the existing Webhook key, provides emergency filter OFF/ON toggles. Never paste keys into chat.
