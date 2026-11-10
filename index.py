@@ -638,3 +638,7 @@ install_preopen_watch(app, storage, send_telegram)
 # Isolated IEX-only intraday research WATCH. DAY/Swing preserved.
 from scanner.intraday_v3 import install as install_intraday_v3
 install_intraday_v3(app, storage, send_telegram)
+
+# Authenticated 13:40 Mountain overnight research WATCH, no orders.
+from scanner.overnight_watch import install as install_overnight_watch
+install_overnight_watch(app, storage, send_telegram)
