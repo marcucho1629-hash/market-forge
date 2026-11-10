@@ -58,13 +58,14 @@ class Gate(unittest.TestCase):
         return telegram_decision(self.store,message,now)
     def test_matching_only_direction(self):
         self.assertTrue(self.check("🚀 AVGO | MC | $123")["allow"])
-        self.assertTrue(self.check("🚨 HIMS | SCMP | $12")["allow"])
+        self.assertFalse(self.check("🚨 HIMS | SCMP | $12")["allow"])
+        self.assertEqual(self.check("🚨 HIMS | SCMP | $12")["reason"],"chase_not_low")
         self.assertFalse(self.check("🚨 AVGO | SCMP | $123")["allow"])
         self.assertFalse(self.check("🚀 HIMS | MC | $123")["allow"])
         self.assertFalse(self.check("🚀 TSLA | MC | $123")["allow"])
         self.assertFalse(self.check("🚀 NVDA | MC | $123")["allow"])
         self.assertEqual(self.check("🚀 NVDA | MC | $123")["reason"],"not_in_directional_top10")
-    def test_early_open_uses_only_the_0720_watch(self):
+    def test_opening_0720_watch_cannot_masquerade_as_verified_low(self):
         morning=datetime(2026,11,10,14,35,tzinfo=timezone.utc)
         with self.store.transaction() as tx:
             tx.put("preopen-watch-v1:"+DAY+":report",
@@ -72,14 +73,37 @@ class Gate(unittest.TestCase):
                         prior_rth_context=dict(selected=[
                             dict(ticker="NVDA",direction="BULLISH",selected=True),
                             dict(ticker="HIMS",direction="BEARISH",selected=True)])))
-        self.assertTrue(self.check("🚀 NVDA | MC | $123",morning)["allow"])
-        self.assertTrue(self.check("🚨 HIMS | SCMP | $123",morning)["allow"])
+        self.assertFalse(self.check("🚀 NVDA | MC | $123",morning)["allow"])
+        self.assertFalse(self.check("🚨 HIMS | SCMP | $123",morning)["allow"])
+        self.assertEqual(self.check("🚨 HIMS | SCMP | $123",morning)["reason"],
+                         "chase_low_unverified_before_0800")
         self.assertFalse(self.check("🚀 TSLA | MC | $123",morning)["allow"])
         self.assertFalse(self.check("🚀 NVDA | MC | $123",NOW)["allow"])
+    def test_med_remains_top10_but_low_is_required_for_new_alerts(self):
+        with self.store.transaction() as tx:
+            snap_now=snap()
+            self.assertIn("HIMS",[r["ticker"] for r in snap_now["selected"]])
+        self.assertEqual(self.check("🚨 HIMS | SCMP | $123")["reason"],"chase_not_low")
+        with self.store.transaction() as tx:
+            snapshot=tx.get("intraday-v3:"+DAY+":latest")
+            snapshot["selected"][1]["chase"]="LOW"
+            snapshot["at"]=(NOW-timedelta(seconds=25)).isoformat()
+            tx.put("intraday-v3:"+DAY+":latest",snapshot)
+        self.assertTrue(self.check("🚨 HIMS | SCMP | $123")["allow"])
+        self.assertEqual(self.check("🚨 HIMS | SCMP | $123")["reason"],"top10_low_matched")
+        # This allows a NEW incoming event; it does not replay any previously
+        # filtered SCMP event or manufacture a signal from the scan itself.
+    def test_unknown_chase_fails_closed_even_if_selected(self):
+        with self.store.transaction() as tx:
+            latest=tx.get("intraday-v3:"+DAY+":latest")
+            latest["selected"][0].pop("chase")
+            tx.put("intraday-v3:"+DAY+":latest",latest)
+        self.assertEqual(self.check("🚀 AVGO | MC | $123")["reason"],"chase_not_low")
     def test_explicit_chop_and_late_chase_never_pass_entry_gate(self):
         with self.store.transaction() as tx:
             current=snap()
             current["selected"][0]["choppy"]=True
+            current["selected"][1]["chase"]="LOW"
             current["selected"][1]["late_chase"]=True
             tx.put("intraday-v3:"+DAY+":latest",current)
         self.assertFalse(self.check("🚀 AVGO | MC | $123")["allow"])
@@ -95,6 +119,7 @@ class Gate(unittest.TestCase):
         set_enabled(self.store,False,NOW)
         self.assertTrue(self.check("🚀 TSLA | MC | $123")["allow"])
         self.assertFalse(status(self.store,NOW)["enabled"])
+        self.assertEqual(status(self.store,NOW)["required_chase"],"LOW")
         set_enabled(self.store,True,NOW)
         self.assertFalse(self.check("🚀 TSLA | MC | $123")["allow"])
     def test_outbox_suppression_is_never_mislabeled_sent(self):
