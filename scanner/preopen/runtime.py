@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from ..free_iex import api, auth, bounds, calendar, DataError, ET, DENVER, utc
 from ..store import drain
 from .core import config, config_hash, evaluate, rank, stamp, validate
+from .v2 import research_report
 
 PREFIX = 'preopen-watch-v1:'
 
@@ -98,6 +99,7 @@ def capture(store, now, session, prior, c):
 def build_report(store, day, cutoff, c):
     with store.transaction() as tx:
         captures = [tx.get(k) for k in tx.get(PREFIX+day+':captures',[])]
+        prior_seed = tx.get(PREFIX+day+':seed', {})
     rows = []
     for s in c['symbols']:
         choices = []
@@ -114,8 +116,11 @@ def build_report(store, day, cutoff, c):
             rows.append(dict(ticker=s,quality='FETCH_FAILED',reasons=list(item['errors'].values()),technical_pass=False))
         else:
             rows.append(evaluate(s,item['seed'],item['1Min'],item['5Min'],stamp(snap['start']),cutoff,received,c))
+    # Separate earlier RTH context is never marked as a V1 premarket technical pass.
+    prior_context = research_report(prior_seed, day, c['symbols'])
     return dict(day=day, mode='RESEARCH_WATCH_ONLY', cutoff=cutoff.isoformat(), config_hash=config_hash(c),
                 quality_counts=dict(Counter(r['quality'] for r in rows)), rows=rows, selected=rank(rows,c),
+                prior_rth_context=prior_context,
                 news_calls=0, feed='iex', strict_minute_pass=sum(r.get('strict_minute_policy_pass',False) for r in rows))
 
 
@@ -133,7 +138,24 @@ def message(report, now):
                   f'Chase PASS · RVOL UNKNOWN · {r["quality"]}',
                   f'기준봉 {stamp(r["data_end"]).astimezone(DENVER):%H:%M} MT · 눌림/돌파 관찰',
                   f'구조 무효화 참고 ${r["structural_stop"]:.2f} · 실제 진입 NOT YET']
-    if not report['selected']: lines += ['', '통과 후보 없음. 데이터 부족과 기술 조건 탈락은 별도 기록했습니다.']
+    if not report['selected']: lines += ['', '장전 검증 통과 후보 0개. 데이터 부족와 기술 조건 탈락을 분리 기록.']
+    # V2: prior RTH research context is never promoted to a premarket candidate
+    # or a trading signal. The message identifies the distinct session.
+    ctx = report.get('prior_rth_context', {})
+    prior_picks = ctx.get('selected', [])
+    counts = ctx.get('quality_counts', {})
+    lines += ['', f'V2 전일 정규장 관찰 후보 {len(prior_picks)}종목 · IEX · 장전 미검증']
+    if prior_picks:
+        visible = prior_picks if not report['selected'] else prior_picks[:4]
+        for p in visible:
+            direction = '상승관찰' if p['direction'] == 'BULLISH' else '하락관찰'
+            lines += [f'{p["ticker"]} {direction} · 전일 {p["prior_date"]} · USD {p["prior_close"]:.2f} · 참고점수 {p["score"]}/100']
+    else:
+        lines += ['전일 기준값도 부족하거나 기술 관찰 기준 미충족']
+    if counts:
+        missing = sum(v for k, v in counts.items() if k not in ('context_eligible', 'context_score_below_minimum', 'no_confirmed_prior_trend'))
+        lines += [f'전일 데이터/품질 제외 {missing}종목 · 현재일 진입검증 별도']
+    lines += ['V2 전일 정보는 07:20 당일 프리마켓 신호·진입 계획이 아닙니다.']
     lines += ['', '점수는 검증 전 연구 가설 · 전체 시장 거래량 아님', 'ID: '+PREFIX+report['day']]
     text = '\n'.join(lines)
     if len(text)>4000: raise ValueError('telegram_message_too_long')
