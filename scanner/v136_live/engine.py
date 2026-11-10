@@ -53,6 +53,7 @@ class Config:
     breakout_lookback: int = 4
     min_prior_bars: int = 4
     chase_ema_atr: float = 2.25
+    entry_mode: str = "aligned_123"  # closed_3m is RESEARCH SHADOW ONLY
     emergency_flip_body_atr: float = 1.55
     two_bar_flip_body_atr: float = 0.65
     profit_activate_atr: float = 1.75
@@ -260,14 +261,20 @@ class Engine:
             signals = state.entry_signals
             aligned = (all(tf in signals for tf in (1, 2, 3)) and
                        len({signals[tf][0] for tf in (1, 2, 3)}) == 1)
-            if (3 in windows_closed and aligned and local.time() < self.cfg.entry_cutoff_et
+            if self.cfg.entry_mode not in ("aligned_123","closed_3m"):
+                raise ValueError("unsupported entry mode")
+            entry_ready = aligned if self.cfg.entry_mode == "aligned_123" else 3 in signals
+            if (3 in windows_closed and entry_ready and local.time() < self.cfg.entry_cutoff_et
                     and (state.cooldown_end is None or bar.end >= state.cooldown_end)):
                 direction = signals[3][0]
                 state.episode += 1
                 state.position = Position(direction, bar.close, bar.end, state.episode, bar.close)
                 state.opposites.clear()
+                reason = ("1m+2m+3m entry signals matched within same 3m cycle"
+                          if self.cfg.entry_mode == "aligned_123"
+                          else "completed 3m entry gate alone; 1m/2m confirmations informational")
                 events.append(self._event(bar, state, "MC" if direction == 1 else "SCMP", 3,
-                                          "1m+2m+3m entry signals matched within same 3m cycle", catalyst))
+                                          reason, catalyst))
                 state.entry_signals.clear()
         if state.position and state.position.entered < bar.end and 10 in windows_closed and not state.position.continued:
             if self._trend(state.windows[5], vwap) == state.position.side and self._trend(state.windows[10], vwap) == state.position.side:
