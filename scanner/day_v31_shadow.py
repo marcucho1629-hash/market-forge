@@ -174,7 +174,20 @@ def compare(data,timeline,received_at,preopen=None,live_events=None):
         replay[name].sort(key=lambda x:(x["time"],x["ticker"],x["action"]))
     a_keys={(x["ticker"],x["action"],x["time"]) for x in replay["A"]}
     b_keys={(x["ticker"],x["action"],x["time"]) for x in replay["B"]}
+    eligible_a=[x for x in replay["A"] if x["gate"]["status"]=="TOP10_LOW_PASS"]
     eligible_b=[x for x in replay["B"] if x["gate"]["status"]=="TOP10_LOW_PASS"]
+    hourly={}
+    for at,snapshot in timeline:
+        hour=at.astimezone(DENVER).strftime("%H")
+        if hour not in hourly:
+            watch=snapshot["selected"]
+            hourly[hour]={
+                "at":at.isoformat(),
+                "bullish":[r["ticker"] for r in watch if r.get("direction")=="BULLISH"],
+                "bearish":[r["ticker"] for r in watch if r.get("direction")=="BEARISH"],
+                "low":[r["ticker"] for r in watch if r.get("chase")=="LOW"],
+                "med":[r["ticker"] for r in watch if r.get("chase")=="MED"]}
+    all_watch={r["ticker"] for _,snap in timeline for r in snap["selected"]}
     possible_fast=[x for x in replay["B"] if x["gate"]["status"] in
                    ("TOP10_MED_WATCH","NOT_IN_TOP10","STALE_TOP10","NO_ASOF_TOP10")]
     pre_picks=(preopen or {}).get("prior_rth_context",{}).get("selected",[])
@@ -191,9 +204,14 @@ def compare(data,timeline,received_at,preopen=None,live_events=None):
         "watch_timeline_snapshots":len(timeline),
         "preopen_prior_watch_count":len(pre_picks),
         "preopen_prior_watch_symbols":[r["ticker"] for r in pre_picks],
+        "observed_hourly_top10":hourly,
+        "top10_unique_symbols_seen":len(all_watch),
+        "top10_symbols_in_3m_replay_universe":sorted(all_watch & set(SYMBOLS)),
+        "top10_symbols_outside_3m_replay_universe":sorted(all_watch - set(SYMBOLS)),
         "live_research_bats_events_seen":len(live_events or []),
         "live_bats_note":"Only confirmed persisted V13.36 events; not Telegram sends and not A/B IEX replay.",
         "A":summarize(replay["A"]),
+        "A_plus_TOP10_LOW":summarize(eligible_a),
         "B":summarize(replay["B"]),
         "B_plus_TOP10_LOW":summarize(eligible_b),
         "C_fast_recheck_needed_not_validated":summarize(possible_fast),
@@ -214,13 +232,15 @@ def compare(data,timeline,received_at,preopen=None,live_events=None):
 
 def telegram_report(report):
     a=report["A"];b=report["B"];l=report["B_plus_TOP10_LOW"];c=report["C_fast_recheck_needed_not_validated"]
+    eligible_a=report["A_plus_TOP10_LOW"]
     lines=["MARKET FORGE AI | 11/11 DAY 3M SHADOW VS TOP10",
         "장 마감 후 동일 IEX 1분봉 회고 비교 · 주문/신규 MC 알림 없음",
         f'20종목 중 데이터 확보 {report["source_symbols_with_25min"]}/20 · 5분 Top10 이력 {report["watch_timeline_snapshots"]}개',
         f'A 기존 1+2+3 일치: {a["count"]}개 (MC {a["mc"]} / SCMP {a["scmp"]})',
         f'B 확정 3분 단독: {b["count"]}개 (MC {b["mc"]} / SCMP {b["scmp"]})',
         f'A와 B 같은 봉 공통 {report["both_same_bar"]} / B만 {report["B_only_same_bar"]}',
-        f'B 중 당시 Top10 + CHASE LOW: {l["count"]}개',
+        f'당시 Top10 + CHASE LOW: A {eligible_a["count"]}개 vs B {l["count"]}개',
+        f'Top10 고유 {report["top10_unique_symbols_seen"]}개 / 3분 감시 가능 {len(report["top10_symbols_in_3m_replay_universe"])}개',
         f'B 차단 사유: {", ".join(k+" "+str(v) for k,v in b["gate_reasons"].items()) or "없음"}',
         f'3분 후보였지만 더 빠른 재검증 검토 대상(C 연구): {c["count"]}개',
         f'B+LOW 방향 일치 15분후 {l["positive_15m"]}/{l["covered_15m"]} (검증 아닌 관찰)',
