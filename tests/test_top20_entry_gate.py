@@ -66,7 +66,7 @@ class Gate(unittest.TestCase):
         self.assertFalse(self.check("🚀 HIMS | MC | $123")["allow"])
         self.assertFalse(self.check("🚀 TSLA | MC | $123")["allow"])
         self.assertFalse(self.check("🚀 NVDA | MC | $123")["allow"])
-        self.assertEqual(self.check("🚀 NVDA | MC | $123")["reason"],"not_in_directional_top10")
+        self.assertEqual(self.check("🚀 NVDA | MC | $123")["reason"],"chase_not_low")
     def test_opening_0720_watch_cannot_masquerade_as_verified_low(self):
         morning=datetime(2026,11,10,14,35,tzinfo=timezone.utc)
         with self.store.transaction() as tx:
