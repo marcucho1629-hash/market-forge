@@ -185,7 +185,7 @@ def worker(store,send,now):
                 tx.put(prefix+"history",history[-8:])
                 tx.enqueue(hour_key+":watch",dict(text=message(snap),expires_at=(now+timedelta(minutes=15)).isoformat()))
             tx.put(prefix+"lease",{})
-        delivery=drain(store,send,prefix=prefix+"hour:",now=utc(),limit=2) if should_send else []
+        delivery=drain(store,send,prefix=prefix+"hour:",now=now,limit=2) if should_send else []
         return dict(status="scanned",asof=end.isoformat(),ready=snap["ready_count"],
                     bullish=sum(p["direction"]=="BULLISH" for p in selected),
                     bearish=sum(p["direction"]=="BEARISH" for p in selected),
