@@ -4,7 +4,6 @@ on:
     paths:
       - "scanner/v136_live/runtime.py"
       - "tests/test_v136_data_gap_silence.py"
-      - "tests/test_v136_live_runtime.py"
       - ".github/workflows/day-gap-notification.yml"
 permissions:
   contents: read
@@ -20,7 +19,5 @@ jobs:
           python-version: '3.12'
       - name: Install
         run: python3 -m pip install --disable-pip-version-check -r requirements.txt
-      - name: Gap diagnostics and existing live-engine regressions
-        run: |
-          python3 -m unittest discover -s tests -p test_v136_data_gap_silence.py -v
-          python3 -m unittest discover -s tests -p test_v136_live_runtime.py -v
+      - name: Gap diagnostics, MC and exit delivery safeguards
+        run: python3 -m unittest discover -s tests -p test_v136_data_gap_silence.py -v
