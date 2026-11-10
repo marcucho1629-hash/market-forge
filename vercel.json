@@ -7,6 +7,10 @@
     {
       "path": "/scanner/overnight-1340/worker",
       "schedule": "40 19,20 * * 1-5"
+    },
+    {
+      "path": "/scanner/v31-shadow/worker",
+      "schedule": "7 20,21 * * 1-5"
     }
   ]
 }

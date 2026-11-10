@@ -642,3 +642,8 @@ install_intraday_v3(app, storage, send_telegram)
 # Authenticated 13:40 Mountain overnight research WATCH, no orders.
 from scanner.overnight_watch import install as install_overnight_watch
 install_overnight_watch(app, storage, send_telegram)
+
+# Nov 11 one-off post-close IEX 1m A/B vs timestamped 5m Top10 Shadow.
+# Research-only, no changes to live Pine/DAY/MC/SCMP/X/SX paths.
+from scanner.day_v31_shadow import install as install_day_v31_shadow
+install_day_v31_shadow(app, storage, send_telegram)
