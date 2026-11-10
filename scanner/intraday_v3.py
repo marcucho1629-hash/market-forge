@@ -66,6 +66,12 @@ def evaluate(sym,bars,opened,end,spy_move=None):
     notional=sum(x["vw"]*x["v"] for x in b)
     r.update(bars=len(b),iex_notional=round(notional),bar_end=ends[-1].isoformat())
     if notional<MIN_NOTIONAL:return r|dict(reason="iex_notional_low")
+    # CHOP and efficiency require a continuous observation window. No gap
+    # interpolation or synthetic 5m candles, even for a popular ticker.
+    window=b[-min(14,len(b)):]
+    times=[datetime.fromisoformat(x["t"].replace("Z","+00:00")) for x in window]
+    if any((n-p).total_seconds()!=300 for p,n in zip(times,times[1:])):
+        return r|dict(reason="structure_gap")
     closes=[x["c"] for x in b];e9=ema(closes,9);e21=ema(closes,21)
     previous=None;tr=[]
     for x in b:
