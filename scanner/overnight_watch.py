@@ -52,9 +52,17 @@ def candidates(snapshot,now):
         score=row.get("score")
         if (not isinstance(ticker,str) or ticker in seen or
                 direction not in ("BULLISH","BEARISH") or
-                type(score) not in (float,int) or row.get("eligible") is not True or
-                row.get("chase")=="HIGH" or score<MIN_SCORE):
+                type(score) not in (float,int) or not MIN_SCORE<=score<=100 or
+                type(row.get("price")) not in (float,int) or row["price"]<=0 or
+                row.get("eligible") is not True or
+                row.get("chase") not in ("LOW","MED")):
             continue
+        try:
+            bar_end=_stamp(row["bar_end"])
+            age=(now-bar_end).total_seconds()
+        except (ValueError,TypeError,KeyError,AttributeError):
+            continue
+        if not 0<=age<=MAX_REFRESH_AGE_SECONDS:continue
         seen.add(ticker)
         chosen.append({key:row.get(key) for key in ("ticker","direction","score","price","chase","bar_end")})
     final=[]
