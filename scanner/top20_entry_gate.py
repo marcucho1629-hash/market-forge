@@ -111,5 +111,13 @@ def status(store,now):
                     refresh_age_sec=(now-updated).total_seconds() if updated else None,
                     top10_bullish=[r["ticker"] for r in snap.get("selected",[]) if r.get("direction")=="BULLISH"],
                     top10_bearish=[r["ticker"] for r in snap.get("selected",[]) if r.get("direction")=="BEARISH"],
+                    low_entry_bullish=[r["ticker"] for r in snap.get("selected",[])
+                                       if r.get("direction")=="BULLISH" and r.get("eligible") is True
+                                       and r.get("chase")=="LOW" and r.get("choppy") is not True
+                                       and r.get("late_chase") is not True],
+                    low_entry_bearish=[r["ticker"] for r in snap.get("selected",[])
+                                       if r.get("direction")=="BEARISH" and r.get("eligible") is True
+                                       and r.get("chase")=="LOW" and r.get("choppy") is not True
+                                       and r.get("late_chase") is not True],
                     entry_filter_only=True,exits_untouched=True,required_chase="LOW",
                     note="New MC/SCMP requires current directional V3 Top10 AND CHASE LOW. MED stays WATCH-only. Before 08:00 MT LOW is unverified, so entry notifications are filtered. X/SX/HX always pass.")
