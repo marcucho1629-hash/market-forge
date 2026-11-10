@@ -54,7 +54,8 @@ def candidates(snapshot,now):
                 direction not in ("BULLISH","BEARISH") or
                 type(score) not in (float,int) or not MIN_SCORE<=score<=100 or
                 type(row.get("price")) not in (float,int) or row["price"]<=0 or
-                row.get("eligible") is not True or
+                row.get("eligible") is not True or row.get("choppy") is True or
+                row.get("late_chase") is True or
                 row.get("chase") not in ("LOW","MED")):
             continue
         try:

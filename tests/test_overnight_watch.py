@@ -37,6 +37,13 @@ class CandidateChecks(unittest.TestCase):
         picks,quality=watch.candidates(snapshot(),WINTER)
         self.assertEqual(quality,"READY")
         self.assertEqual([x["ticker"] for x in picks],["NVDA","HIMS"])
+    def test_flagged_chop_or_late_chase_never_enters_overnight(self):
+        data=snapshot()
+        data["selected"][0]["choppy"]=True
+        data["selected"][1]["late_chase"]=True
+        items,quality=watch.candidates(data,WINTER)
+        self.assertEqual(quality,"READY")
+        self.assertEqual(items,[])
     def test_snapshot_unavailable_no_fallback(self):
         self.assertEqual(watch.candidates({},WINTER),([],"MISSING_SCANNER_SNAPSHOT"))
         stale=snapshot(WINTER-timedelta(minutes=30))

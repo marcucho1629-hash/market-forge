@@ -45,6 +45,54 @@ class Core(unittest.TestCase):
         r=v.evaluate("NVDA",bars(spike=True),OPEN,OPEN+timedelta(minutes=40),spy_move=0)
         self.assertEqual(r["chase"],"HIGH")
         self.assertFalse(r["eligible"])
+        self.assertEqual(r["reason"],"late_chase")
+    def test_choppy_sideways_excluded_both_directions(self):
+        # Realistic two-sided whipsaws: high travel, little net progress.
+        sample=[]
+        for i in range(14):
+            midpoint=100+(-1 if i%2 else 1)*.12+i*.003
+            op=midpoint+(-.015 if i%2 else .015)
+            sample.append(dict(t=(OPEN+timedelta(minutes=i*5)).isoformat(),
+                               o=op,h=max(op,midpoint)+.08,l=min(op,midpoint)-.08,
+                               c=midpoint,v=45000,n=120,vw=(op+midpoint)/2))
+        r=v.evaluate("NVDA",sample,OPEN,OPEN+timedelta(minutes=70),spy_move=0)
+        self.assertEqual(r["quality"],"READY")
+        self.assertEqual(r["reason"],"choppy_chart")
+        self.assertTrue(r["choppy"])
+        self.assertFalse(r["eligible"])
+        self.assertGreaterEqual(r["choppiness"],61.8)
+    def test_missing_structure_window_bars_stay_disqualified(self):
+        sample=bars(count=14)
+        del sample[-9]
+        row=v.evaluate("NVDA",sample,OPEN,OPEN+timedelta(minutes=70),spy_move=0)
+        self.assertEqual(row["reason"],"structure_gap")
+        self.assertFalse(row["eligible"])
+    def test_clean_trend_is_not_choppy_but_may_be_too_late_to_enter(self):
+        # Clean multi-bar trend != an attractive fresh entry.
+        r=v.evaluate("NVDA",bars(count=14),OPEN,OPEN+timedelta(minutes=70),spy_move=0)
+        self.assertFalse(r["choppy"])
+        self.assertEqual(r["direction"],"BULLISH")
+        self.assertIn(r["reason"],("qualified","late_chase"))
+        if r["reason"]=="late_chase":
+            self.assertFalse(r["eligible"])
+            self.assertEqual(r["chase"],"HIGH")
+    def test_extreme_bearish_extension_not_selected(self):
+        sample=bars(direction=-1,spike=True)
+        r=v.evaluate("HIMS",sample,OPEN,OPEN+timedelta(minutes=40),spy_move=0)
+        self.assertEqual(r["direction"],"BEARISH")
+        self.assertEqual(r["reason"],"late_chase")
+        self.assertFalse(r["eligible"])
+    def test_chop_and_late_chase_are_removed_not_replaced(self):
+        base=[dict(ticker="NVDA",direction="BULLISH"),
+              dict(ticker="HIMS",direction="BEARISH")]
+        rows=[dict(ticker="NVDA",direction="NEUTRAL",quality="READY",reason="choppy_chart"),
+              dict(ticker="HIMS",direction="BEARISH",quality="READY",reason="late_chase")]
+        statuses,removed=v.compare(base,[],rows)
+        self.assertEqual(statuses,{})
+        self.assertEqual({r["ticker"]:r["status"] for r in removed},
+                         {"NVDA":"CHOPPY","HIMS":"CHASE"})
+        self.assertEqual(v.select(rows),[])
+
     def test_flip_weakness_and_no_forced_ten(self):
         pre=[{"ticker":"NVDA","direction":"BULLISH"},
              {"ticker":"HIMS","direction":"BEARISH"}]
@@ -63,6 +111,7 @@ class Core(unittest.TestCase):
                statuses={p["ticker"]:"NEW" for p in selected},removed=[])
         self.assertLess(len(v.message(r)),3900)
         self.assertIn("WATCH ONLY",v.message(r))
+        self.assertIn("Top 10 강제 충원 없음",v.message(r))
 
 class Worker(unittest.TestCase):
     def setUp(self):

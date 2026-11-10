@@ -76,6 +76,14 @@ class Gate(unittest.TestCase):
         self.assertTrue(self.check("🚨 HIMS | SCMP | $123",morning)["allow"])
         self.assertFalse(self.check("🚀 TSLA | MC | $123",morning)["allow"])
         self.assertFalse(self.check("🚀 NVDA | MC | $123",NOW)["allow"])
+    def test_explicit_chop_and_late_chase_never_pass_entry_gate(self):
+        with self.store.transaction() as tx:
+            current=snap()
+            current["selected"][0]["choppy"]=True
+            current["selected"][1]["late_chase"]=True
+            tx.put("intraday-v3:"+DAY+":latest",current)
+        self.assertFalse(self.check("🚀 AVGO | MC | $123")["allow"])
+        self.assertFalse(self.check("🚨 HIMS | SCMP | $123")["allow"])
     def test_stale_missing_and_old_session_fail_closed(self):
         self.assertEqual(self.check("🚀 AVGO | MC | $123",NOW+timedelta(minutes=13))["reason"],"stale_snapshot")
         with self.store.transaction() as tx:
