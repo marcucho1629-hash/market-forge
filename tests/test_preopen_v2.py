@@ -57,9 +57,8 @@ class PriorContext(unittest.TestCase):
         self.assertEqual(v2.prior_context("AAPL", rows, NEXT)["reason"], "invalid_seed")
 
     def test_missing_latest_hour_prevents_watch(self):
-        rows = seed()
-        rows[-1]["t"] = (PRIOR + timedelta(minutes=5*90)).isoformat()
-        self.assertEqual(v2.prior_context("AAPL", rows, NEXT)["reason"], "rth_last_bar_stale") if False else None
+        rows = seed(count=74)
+        self.assertEqual(v2.prior_context("AAPL", rows, NEXT)["reason"], "rth_last_bar_stale")
         # A missing bar inside the final hour is a clear gap even if the
         # penultimate timestamp remains in regular session.
         rows = seed()
