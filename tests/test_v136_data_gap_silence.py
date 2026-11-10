@@ -39,7 +39,7 @@ class GapTelegramSafety(unittest.TestCase):
             self.assertTrue(state["gaps"])
             self.assertIsNotNone(state["missing_end"])
             self.assertEqual(state["observed_gaps"],1)
-            self.assertEqual(state["processed"],0)
+            self.assertEqual(state["processed"],candle(2)[1])
             self.assertEqual(tx.execute("SELECT COUNT(*) FROM mf_outbox WHERE id LIKE ?",
                                         (day.PREFIX+"%:DATA_GAP:%",)).fetchone()[0],0)
         self.feed([candle(3)],3)
@@ -78,14 +78,17 @@ class GapTelegramSafety(unittest.TestCase):
                             (day.PREFIX+"%:DATA_GAP:%",)).fetchall()
             self.assertEqual(gaps,[])
 
-    def test_gap_recovery_is_unchanged(self):
+    def test_late_backfill_is_not_reinterpreted_as_live_signal(self):
         self.feed([candle(2)],2)
         self.feed([candle(1),candle(2)],2)
         with self.store.transaction() as tx:
             state=tx.get(day.PREFIX+"2026-10-23:TSLA")
+            # The old missing candle is retained, but deliberately excluded
+            # from replay of already-processed signals; no fabricated fix.
             self.assertEqual(state["processed"],candle(2)[1])
-            self.assertEqual(state["observed_gaps"],0)
-            self.assertEqual(state["data_quality"],"complete")
+            self.assertIn(candle(1)[1],state["ignored_backfills"])
+            self.assertEqual(state["observed_gaps"],1)
+            self.assertEqual(state["data_quality"],"partial_minutes")
 
 if __name__=="__main__":
     unittest.main()
