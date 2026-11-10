@@ -106,7 +106,7 @@ class Gate(unittest.TestCase):
         import index
         response=Mock(status_code=200)
         response.json.return_value={"ok":True}
-        with patch.object(index,"storage",return_value=self.store),patch.object(index.requests,"post",return_value=response) as post:
+        with patch.dict("os.environ",{"TELEGRAM_BOT_TOKEN":"unit-test-token","TELEGRAM_CHAT_ID":"unit-test-chat"}),patch.object(index,"storage",return_value=self.store),patch.object(index.requests,"post",return_value=response) as post:
             self.assertIs(index.send_telegram("🚀 TSLA | MC | $123"),TOP20_ENTRY_FILTERED)
             post.assert_not_called()
             self.assertEqual(index.send_telegram("✖ TSLA X · 상승 후보 종료"),200)
