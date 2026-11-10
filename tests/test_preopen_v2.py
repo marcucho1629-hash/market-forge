@@ -99,6 +99,7 @@ class ReportIntegration(unittest.TestCase):
     def test_v1_remains_zero_while_v2_context_is_separate(self):
         self.assertEqual(len(self.report["selected"]), 0)
         self.assertEqual(self.report["quality_counts"], {"FETCH_FAILED": 150})
+        self.assertEqual(self.report["quality_reason_counts"], {"no_on_time_capture": 150})
         context = self.report["prior_rth_context"]
         self.assertEqual(len(context["selected"]), 2)
         self.assertTrue(all(p["category"] == "PRIOR_RTH_ONLY" for p in context["selected"]))
@@ -107,6 +108,7 @@ class ReportIntegration(unittest.TestCase):
     def test_message_distinguishes_two_feeds_and_never_claims_entry(self):
         msg = runtime.message(self.report, CUTOFF + timedelta(seconds=5))
         self.assertIn("장전 검증 통과 후보 0개", msg)
+        self.assertIn("주요 미통과 사유: no_on_time_capture 150", msg)
         self.assertIn("V2 전일 정규장 관찰 후보 2종목", msg)
         self.assertIn("장전 미검증", msg)
         self.assertIn("실제 진입 신호 아님", msg)
