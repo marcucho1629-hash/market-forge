@@ -56,7 +56,7 @@ def evaluate(sym,bars,opened,end,spy_move=None):
              direction="BULLISH" if direction==1 else "BEARISH" if direction==-1 else "NEUTRAL")
     if not direction:return r|dict(score=0,reason="direction_conflict")
     d=direction;impulse=d*(price-closes[-4])/atr;egap=d*(price-e9[-1])/atr;vgap=d*(price-vwap)/atr
-    chase="HIGH" if egap>1.5 or vgap>2.5 or impulse>2.2 else "MED" if egap>1.0 or vgap>1.8 or impulse>1.6 else "LOW"
+    chase="HIGH" if impulse>3.0 or (egap>2.2 and vgap>4.5) else "MED" if egap>1.3 or vgap>3.0 or impulse>1.8 else "LOW"
     vbase=sum(x["v"] for x in b[-6:-3]);vr=sum(x["v"] for x in b[-3:])/vbase if vbase else 0
     hi=max(x["h"] for x in b[-6:]);lo=min(x["l"] for x in b[-6:])
     pos=(price-lo)/(hi-lo) if hi>lo else .5
