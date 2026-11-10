@@ -93,6 +93,16 @@ def engine():
 
 
 def send_telegram(msg):
+    # Final notification-only gate. Applies to supported legacy / DAY / test
+    # new-entry message formats without altering Pine, exits, or trade state.
+    from scanner.top20_entry_gate import entry_from_text, telegram_decision
+    from scanner.store import TOP20_ENTRY_FILTERED
+    if entry_from_text(msg):
+        decision=telegram_decision(storage(),msg,now_utc())
+        if not decision['allow']:
+            log.info('TOP20_ENTRY_FILTERED ticker=%s action=%s reason=%s',
+                     decision.get('ticker'),decision.get('code'),decision.get('reason'))
+            return TOP20_ENTRY_FILTERED
     token,chat=os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_ID')
     if not token or not chat: raise RuntimeError('Telegram configuration missing')
     response=requests.post(f'https://api.telegram.org/bot{token}/sendMessage',
@@ -158,6 +168,10 @@ def webhook(data:dict):
     try: status=send_telegram(msg)
     except Exception:
         raise HTTPException(502,'Telegram delivery failed') from None
+    from scanner.store import TOP20_ENTRY_FILTERED
+    if status is TOP20_ENTRY_FILTERED:
+        return {'status':'filtered_top20','ticker':ticker,'action':action,
+                'telegram_status':None,'comparison_log':log_status}
     return {'status':'ok','ticker':ticker,'action':action,'telegram_status':status,
             'comparison_log':log_status}
 

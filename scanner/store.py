@@ -5,6 +5,13 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+class TelegramEntryFiltered:
+    """Explicit outbox result: no Telegram API call was attempted."""
+
+
+TOP20_ENTRY_FILTERED = TelegramEntryFiltered()
+
+
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS mf_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mf_events (id TEXT PRIMARY KEY, session TEXT NOT NULL, payload TEXT NOT NULL);
@@ -95,8 +102,8 @@ def drain(store,send,limit=5,prefix=None,now=None,clock=None):
             tx.execute("UPDATE mf_outbox SET status='attempting' WHERE id=?",(id,))
         send_started_at = clock().isoformat()
         try:
-            send(json.loads(payload)['text'])
-            status='sent'
+            result=send(json.loads(payload)['text'])
+            status='filtered_top20' if result is TOP20_ENTRY_FILTERED else 'sent'
         except Exception:
             status='uncertain_or_failed'
         send_completed_at = clock().isoformat()
