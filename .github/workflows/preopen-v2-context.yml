@@ -21,3 +21,4 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check -r requirements.txt
       - name: V1 existing and V2 prior-session regression tests
         run: python3 -m unittest discover -s tests -p 'test_preopen*.py' -v
+          python3 -m unittest discover -s tests -p test_intraday_v3.py -v
