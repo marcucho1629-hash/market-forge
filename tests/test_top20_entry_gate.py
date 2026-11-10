@@ -58,6 +58,8 @@ class Gate(unittest.TestCase):
         return telegram_decision(self.store,message,now)
     def test_matching_only_direction(self):
         self.assertTrue(self.check("🚀 AVGO | MC | $123")["allow"])
+        self.assertEqual(status(self.store,NOW)["low_entry_bullish"],["AVGO"])
+        self.assertEqual(status(self.store,NOW)["low_entry_bearish"],[])
         self.assertFalse(self.check("🚨 HIMS | SCMP | $12")["allow"])
         self.assertEqual(self.check("🚨 HIMS | SCMP | $12")["reason"],"chase_not_low")
         self.assertFalse(self.check("🚨 AVGO | SCMP | $123")["allow"])
@@ -90,6 +92,7 @@ class Gate(unittest.TestCase):
             snapshot["at"]=(NOW-timedelta(seconds=25)).isoformat()
             tx.put("intraday-v3:"+DAY+":latest",snapshot)
         self.assertTrue(self.check("🚨 HIMS | SCMP | $123")["allow"])
+        self.assertEqual(status(self.store,NOW)["low_entry_bearish"],["HIMS"])
         self.assertEqual(self.check("🚨 HIMS | SCMP | $123")["reason"],"top10_low_matched")
         # This allows a NEW incoming event; it does not replay any previously
         # filtered SCMP event or manufacture a signal from the scan itself.
