@@ -139,11 +139,10 @@ def ingest(store, data, now, calendar=schedule):
             if state['position']: state['position']['entered']=state['position']['entered'].isoformat()
             if active and state.get('halted'):
                 queue(tx,f'{PREFIX}{day}:{symbol}:DATA_CONFLICT',f'DAY TEST {symbol} 확정봉 충돌: 신규 신호 중지',now)
-            if active and gaps and state.get('notified_gaps',0)<len(gaps):
-                last=gaps[-1]
-                queue(tx,f'{PREFIX}{day}:{symbol}:DATA_GAP:{last["from_ms"]}',
-                      f'DAY TEST {symbol} 데이터 누락 감지\n누락 가격을 보충하지 않고 새 완성봉부터 재개합니다. 누락 구간 판단은 불가합니다.',now)
-                state['notified_gaps']=len(gaps)
+            # Preserve data-gap detection, failed-bar safety and recovery in
+            # persisted state, but stop noisy per-symbol DATA_GAP Telegram alerts.
+            # Observability stays available through status/diagnostic_export.
+            state['observed_gaps']=len(gaps)
             tx.put(key,state)
         tx.put(PREFIX+'bank:'+str(data['bank']),{'received_at':now.isoformat(),'day':day,'accepted':accepted,'submitted':len(rows)})
     return {'source':VERSION,'accepted':accepted,'bank':data['bank']}
@@ -151,6 +150,10 @@ def ingest(store, data, now, calendar=schedule):
 def delivery(store,send,now):
     with store.transaction() as tx:
         active=enabled(tx,now)
+        # Drop only legacy pending gap *notifications*, not gap detection or
+        # critical DATA_CONFLICT notices. Keep expired rows for audit.
+        tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",
+                   (PREFIX+'%:DATA_GAP:%',))
         if not active:
             tx.execute("UPDATE mf_outbox SET status='expired' WHERE status='pending' AND id LIKE ?",(PREFIX+'%',))
     return drain(store,send,limit=30,prefix=PREFIX,now=None) if active else []
