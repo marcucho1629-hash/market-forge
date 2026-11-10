@@ -78,6 +78,25 @@ class GapTelegramSafety(unittest.TestCase):
                             (day.PREFIX+"%:DATA_GAP:%",)).fetchall()
             self.assertEqual(gaps,[])
 
+    def test_mc_and_exit_messages_still_delivered_while_gap_expires(self):
+        expiry=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()
+        with self.store.transaction() as tx:
+            tx.enqueue(day.PREFIX+"2026-10-23:TSLA:DATA_GAP:123",
+                       dict(text="DAY TEST TSLA 데이터 누락 감지",expires_at=expiry))
+            tx.enqueue(day.PREFIX+"2026-10-23:TSLA:1:MC:123",
+                       dict(text="DAY TEST TSLA MC",expires_at=expiry))
+            tx.enqueue(day.PREFIX+"2026-10-23:TSLA:1:FAST_X:124",
+                       dict(text="DAY TEST TSLA FAST_X",expires_at=expiry))
+        sent=[]
+        day.delivery(self.store,sent.append,datetime.now(timezone.utc))
+        self.assertCountEqual(sent,["DAY TEST TSLA MC","DAY TEST TSLA FAST_X"])
+        with self.store.transaction() as tx:
+            statuses=dict(tx.execute("SELECT id,status FROM mf_outbox WHERE id LIKE ?",
+                                     (day.PREFIX+"2026-10-23:TSLA:%",)).fetchall())
+        self.assertEqual(statuses[day.PREFIX+"2026-10-23:TSLA:DATA_GAP:123"],"expired")
+        self.assertEqual(statuses[day.PREFIX+"2026-10-23:TSLA:1:MC:123"],"sent")
+        self.assertEqual(statuses[day.PREFIX+"2026-10-23:TSLA:1:FAST_X:124"],"sent")
+
     def test_late_backfill_is_not_reinterpreted_as_live_signal(self):
         self.feed([candle(2)],2)
         self.feed([candle(1),candle(2)],2)
