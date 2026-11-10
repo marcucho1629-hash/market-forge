@@ -64,6 +64,18 @@ class Gate(unittest.TestCase):
         self.assertFalse(self.check("🚀 TSLA | MC | $123")["allow"])
         self.assertFalse(self.check("🚀 NVDA | MC | $123")["allow"])
         self.assertEqual(self.check("🚀 NVDA | MC | $123")["reason"],"not_in_directional_top10")
+    def test_early_open_uses_only_the_0720_watch(self):
+        morning=datetime(2026,11,10,14,35,tzinfo=timezone.utc)
+        with self.store.transaction() as tx:
+            tx.put("preopen-watch-v1:"+DAY+":report",
+                   dict(day=DAY,cutoff="2026-11-10T14:20:00+00:00",
+                        prior_rth_context=dict(selected=[
+                            dict(ticker="NVDA",direction="BULLISH",selected=True),
+                            dict(ticker="HIMS",direction="BEARISH",selected=True)])))
+        self.assertTrue(self.check("🚀 NVDA | MC | $123",morning)["allow"])
+        self.assertTrue(self.check("🚨 HIMS | SCMP | $123",morning)["allow"])
+        self.assertFalse(self.check("🚀 TSLA | MC | $123",morning)["allow"])
+        self.assertFalse(self.check("🚀 NVDA | MC | $123",NOW)["allow"])
     def test_stale_missing_and_old_session_fail_closed(self):
         self.assertEqual(self.check("🚀 AVGO | MC | $123",NOW+timedelta(minutes=13))["reason"],"stale_snapshot")
         with self.store.transaction() as tx:
