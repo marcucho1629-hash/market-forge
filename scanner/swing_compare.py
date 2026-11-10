@@ -84,17 +84,26 @@ def ingest_bank(store,data,now):
     for h in health:
         if type(h.get('bar_end_ms')) is not int or type(h.get('ready')) is not bool: raise ValueError('health fields')
     prepared=[]
+    rejected=[]
+    # One malformed model event must not erase unrelated valid symbols in its
+    # authenticated bank heartbeat. Envelope identity/clock/health are still
+    # validated above before anything can be written.
     for event in events:
-        if not isinstance(event,dict) or event.get('ticker') not in allowed or event.get('bar_end_ms')!=data['bar_end_ms']:
-            raise ValueError('event identity')
-        # request.security calculations carry a per-symbol calculation clock.
-        # The authenticated outer envelope is the actual webhook emission clock.
-        computed=event.get('emitted_ms')
-        if type(computed) is not int or computed > data['emitted_ms']+10000:
-            raise ValueError('event clock')
-        normalized=dict(event,source_computed_ms=computed,emitted_ms=data['emitted_ms'])
-        prepared.append(prepare(normalized,now))
-    # Validate the complete batch before any state/queue writes.
+        try:
+            if not isinstance(event,dict) or event.get('ticker') not in allowed or event.get('bar_end_ms')!=data['bar_end_ms']:
+                raise ValueError('event identity')
+            # request.security carries a computed clock, not the delivery clock.
+            computed=event.get('emitted_ms')
+            if type(computed) is not int or computed > data['emitted_ms']+10000:
+                raise ValueError('event clock')
+            normalized=dict(event,source_computed_ms=computed,emitted_ms=data['emitted_ms'])
+            prepared.append(prepare(normalized,now))
+        except (ValueError,TypeError,KeyError,OverflowError) as exc:
+            safe={'event identity','event clock','stale','event time','plan time',
+                  'model identity','action','feed','price','schema or ticker','model'}
+            reason=str(exc) if str(exc) in safe else 'invalid_event'
+            rejected.append(reason)
+    # Commit successful entries and low-cardinality rejection counts together.
     with store.transaction() as tx:
         queued=0
         for key,msg,record in prepared:
@@ -102,10 +111,22 @@ def ingest_bank(store,data,now):
             tx.put(key,record);tx.event(key,now.date().isoformat(),record)
             tx.enqueue(key,{'text':msg,'expires_at':(now+timedelta(seconds=180)).isoformat()})
             tx.put(PREFIX+'latest',record);queued+=1
-        tx.put(PREFIX+'bank:'+str(data['bank']),{'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],'health':health,'events':len(events),'queued':queued})
-        trace={'bank':data['bank'],'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],'emitted_ms':data['emitted_ms'],'health':health,'events':len(events),'queued':queued}
-        tx.put('swing-diagnostic:hour:'+str(data['bank'])+':'+str(data['bar_end_ms']),trace)
-    return {'status':'accepted','bank':data['bank'],'queued':queued}
+        bank=str(data['bank'])
+        trace={'bank':data['bank'],'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],
+               'emitted_ms':data['emitted_ms'],'health':health,'events':len(events),
+               'valid_events':len(prepared),'rejected_events':len(rejected),
+               'rejection_reasons':sorted(set(rejected)),'queued':queued}
+        tx.put(PREFIX+'bank:'+bank,trace)
+        tx.put('swing-diagnostic:hour:'+bank+':'+str(data['bar_end_ms']),trace)
+        if rejected:
+            day=now.astimezone(ZoneInfo('America/New_York')).date().isoformat()
+            key='swing-diagnostic:event-reject:'+day+':'+bank
+            old=tx.get(key,{'count':0,'reasons':{}})
+            reasons=dict(old['reasons'])
+            for reason in rejected: reasons[reason]=reasons.get(reason,0)+1
+            tx.put(key,{'count':old['count']+len(rejected),'reasons':reasons,'last_at':now.isoformat()})
+    return {'status':'partial_accepted' if rejected else 'accepted',
+            'bank':data['bank'],'queued':queued,'rejected_events':len(rejected)}
 
 def install(app,storage,send):
     def authenticate(value):
