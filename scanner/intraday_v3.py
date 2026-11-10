@@ -220,4 +220,9 @@ def install(app,storage,send):
         secret=os.getenv("CRON_SECRET","")
         if not secret or not hmac.compare_digest(request.headers.get("authorization",""),"Bearer "+secret):
             raise HTTPException(401,"Unauthorized")
-        return worker(storage(),send,utc())
+        result=worker(storage(),send,utc())
+        # Sanitized operational receipt. No token, chat ID, prices or tickers.
+        safe={k:result.get(k) for k in ("status","asof","ready","bullish","bearish","telegram_queued","bigdata_calls")}
+        safe["delivery_states"]=[x.get("status") for x in result.get("delivery",[])]
+        print("INTRADAY_V3_CRON "+json.dumps(safe,sort_keys=True),flush=True)
+        return result
