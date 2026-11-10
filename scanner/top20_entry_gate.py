@@ -16,7 +16,7 @@ MAX_SNAPSHOT_AGE_SECONDS=660
 # Only new entry-message forms, never CONFIRM / CANCEL / X / SX / HX,
 # status, DATA_GAP or other messages mentioning an old MC/SCMP.
 FIRST_LINE_PATTERNS=[
-    re.compile(r"^[^\s]+\s+([A-Z][A-Z0-9.]{0,8})\s+(MC|SCMP)\s+·"),
+    re.compile(r"^(?!TEST\b)[^\s]+\s+([A-Z][A-Z0-9.]{0,8})\s+(MC|SCMP)\s+·"),
     re.compile(r"^(?:🚀|🚨)\s+([A-Z][A-Z0-9.]{0,8})\s+\|\s+(MC|SCMP)\s+\|"),
     re.compile(r"^DAY TEST\s+([A-Z][A-Z0-9.]{0,8})\s+(MC|SCMP)\s*$"),
     re.compile(r"^TEST\s+⚡\s+([A-Z][A-Z0-9.]{0,8})\s+EARLY\s+(MC|SCMP)(?:\s|$)"),
