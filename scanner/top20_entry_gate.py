@@ -84,7 +84,9 @@ def evaluate(tx,ticker,action,now,allow_off=True):
     if len(side)>10 or len(side)!=len({r.get("ticker") for r in side}):
         return dict(allow=False,reason="invalid_snapshot_rank")
     for r in side:
-        if r.get("ticker")==ticker and r.get("eligible") is True and r.get("chase")!="HIGH":
+        if (r.get("ticker")==ticker and r.get("eligible") is True
+                and r.get("choppy") is not True and r.get("late_chase") is not True
+                and r.get("chase")!="HIGH"):
             return dict(allow=True,reason="top10_matched",score=r.get("score"),asof=snap["bar_cutoff"])
     return dict(allow=False,reason="not_in_directional_top10")
 
