@@ -67,11 +67,15 @@ class Core(unittest.TestCase):
         row=v.evaluate("NVDA",sample,OPEN,OPEN+timedelta(minutes=70),spy_move=0)
         self.assertEqual(row["reason"],"structure_gap")
         self.assertFalse(row["eligible"])
-    def test_clean_trend_not_called_choppy(self):
+    def test_clean_trend_is_not_choppy_but_may_be_too_late_to_enter(self):
+        # Clean multi-bar trend != an attractive fresh entry.
         r=v.evaluate("NVDA",bars(count=14),OPEN,OPEN+timedelta(minutes=70),spy_move=0)
         self.assertFalse(r["choppy"])
         self.assertEqual(r["direction"],"BULLISH")
-        self.assertTrue(r["eligible"])
+        self.assertIn(r["reason"],("qualified","late_chase"))
+        if r["reason"]=="late_chase":
+            self.assertFalse(r["eligible"])
+            self.assertEqual(r["chase"],"HIGH")
     def test_extreme_bearish_extension_not_selected(self):
         sample=bars(direction=-1,spike=True)
         r=v.evaluate("HIMS",sample,OPEN,OPEN+timedelta(minutes=40),spy_move=0)
