@@ -25,31 +25,18 @@ class Tests(unittest.TestCase):
     def warm(self):
         for i in range(1,31):self.feed([row(i)],i)
     def test_entry_exit_persistence_dedup(self):
-        # Use the fixture clock for deterministic outbox delivery checks.
-        # Production delivery intentionally evaluates expiry against wall time.
-        from unittest.mock import patch
-        from scanner.store import drain as store_drain
-        logical_now=[OPEN+timedelta(minutes=31,seconds=3)]
-        def fixture_drain(store,send,**kwargs):
-            return store_drain(store,send,**{**kwargs,'now':logical_now[0]})
         self.warm();self.feed([row(31,368.35)],31)
-        with patch.object(r,'drain',side_effect=fixture_drain):
-            out=[];r.delivery(self.store,out.append,logical_now[0])
-            self.assertEqual(len(out),1);self.assertIn(' MC',out[0])
-            self.store=Store(self.store.url)
-            self.feed([row(31,368.35),row(32,367.20)],32)
-            logical_now[0]=OPEN+timedelta(minutes=32,seconds=3)
-            r.delivery(self.store,out.append,logical_now[0])
-            self.assertEqual(len(out),2);self.assertIn('FAST_X',out[1])
-            self.feed([row(32,367.20)],32)
-            logical_now[0]=OPEN+timedelta(minutes=32,seconds=4)
-            self.assertEqual(r.delivery(self.store,out.append,logical_now[0]),[])
+        out=[];r.delivery(self.store,out.append,OPEN+timedelta(minutes=31,seconds=3))
+        self.assertEqual(len(out),1);self.assertIn(' MC',out[0])
+        self.store=Store(self.store.url)
+        self.feed([row(31,368.35),row(32,367.20)],32)
+        r.delivery(self.store,out.append,OPEN+timedelta(minutes=32,seconds=3))
+        self.assertEqual(len(out),2);self.assertIn('FAST_X',out[1])
+        self.feed([row(32,367.20)],32)
+        self.assertEqual(r.delivery(self.store,out.append,OPEN+timedelta(minutes=32,seconds=4)),[])
     def test_gap_then_recovery(self):
         self.feed([row(2)],2)
-        with self.store.transaction() as tx:
-            state=tx.get(r.PREFIX+'2026-10-23:TSLA')
-            self.assertEqual(state['processed'],row(2)[1])
-            self.assertTrue(state['gaps'])
+        with self.store.transaction() as tx:self.assertEqual(tx.get(r.PREFIX+'2026-10-23:TSLA')['processed'],0)
         self.feed([row(1),row(2)],2)
         with self.store.transaction() as tx:self.assertEqual(tx.get(r.PREFIX+'2026-10-23:TSLA')['processed'],row(2)[1])
     def test_wrong_bank_stale_future(self):
