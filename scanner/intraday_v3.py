@@ -199,7 +199,7 @@ def worker(store,send,now):
 def install(app,storage,send):
     @app.get("/intraday-v3",response_class=HTMLResponse)
     def panel():
-        return '<meta charset="utf-8"><h2>INTRADAY V3 | Bullish 10 / Bearish 10</h2><p>IEX 5분 스캔 · 시간별 WATCH</p><form method="post" action="/intraday-v3/control"><input type="password" name="secret" required placeholder="웹훅 키"><button name="action" value="status">오늘 결과 조회</button><button name="action" value="run">지금 스캔</button></form><p>매매 주문 없음. 기존 MC/SCMP/X/SX 유지.</p>'
+        return '<meta charset="utf-8"><h2>INTRADAY V3 | Bullish 10 / Bearish 10</h2><p>IEX 5분 스캔 · 시간별 WATCH</p><form method="post" action="/intraday-v3/control"><input type="password" name="secret" required placeholder="웹훅 키"><button name="action" value="status">오늘 결과 조회</button><button name="action" value="run">지금 스캔</button><button name="action" value="gate_status">MC/SCMP 필터 상태</button><button name="action" value="gate_off">필터 긴급 해제</button><button name="action" value="gate_on">필터 다시 활성화</button></form><p>매매 주문 없음. 기존 MC/SCMP/X/SX 유지.</p>'
     @app.post("/intraday-v3/control",response_class=HTMLResponse)
     async def control(request:Request):
         raw=await request.body()
@@ -207,6 +207,11 @@ def install(app,storage,send):
         fields=parse_qs(raw.decode());auth(fields.get("secret",[""])[0])
         action=fields.get("action",["status"])[0]
         if action=="run":result=worker(storage(),send,utc())
+        elif action in ("gate_status","gate_on","gate_off"):
+            from .top20_entry_gate import set_enabled, status as gate_status
+            if action in ("gate_on","gate_off"):
+                set_enabled(storage(),action=="gate_on",utc())
+            result=gate_status(storage(),utc())
         elif action=="status":
             day=utc().astimezone(DENVER).date().isoformat()
             with storage().transaction() as tx:
