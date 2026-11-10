@@ -47,24 +47,13 @@ def evaluate(tx,ticker,action,now,allow_off=True):
     if cfg.get("enabled") is False and allow_off:
         return dict(allow=True,reason="operator_disabled")
     day=now.astimezone(ET).date().isoformat()
-    # 07:30-07:59 MT: the authenticated 07:20 WATCH Top 10 is the only
-    # published scanner list. Never substitute this prior-RTH research context
-    # after the 08:00 MT intraday recheck starts.
+    # 07:30-07:59 MT: the 07:20 prior-session watch does not contain a
+    # current-day CHASE LOW classification. Never infer LOW from old candles.
+    # Once the first 08:00 V3 sample completes, rely solely on live snapshots.
     from zoneinfo import ZoneInfo
     local=now.astimezone(ZoneInfo("America/Denver"))
     if local.hour==7 and local.minute>=30:
-        pre=tx.get("preopen-watch-v1:"+day+":report",{})
-        if pre.get("day")!=day:
-            return dict(allow=False,reason="missing_0720_watch")
-        rows=(pre.get("prior_rth_context",{}).get("selected",[])
-              or pre.get("selected",[]))
-        expected="BULLISH" if action=="MC" else "BEARISH"
-        matching=[r for r in rows if isinstance(r,dict) and r.get("direction")==expected]
-        if len(matching)>10:
-            return dict(allow=False,reason="invalid_0720_rank")
-        permitted=any(r.get("ticker")==ticker for r in matching)
-        return dict(allow=permitted,reason="matched_0720_watch" if permitted else "not_in_0720_watch",
-                    asof=pre.get("cutoff"),data_note="prior_session_context_not_same_day_confirmed")
+        return dict(allow=False,reason="chase_low_unverified_before_0800")
     snap=tx.get(PREFIX+day+":latest",{})
     if not snap or snap.get("day")!=day or snap.get("mode")!="WATCH_ONLY":
         return dict(allow=False,reason="missing_current_day_snapshot")
@@ -84,10 +73,14 @@ def evaluate(tx,ticker,action,now,allow_off=True):
     if len(side)>10 or len(side)!=len({r.get("ticker") for r in side}):
         return dict(allow=False,reason="invalid_snapshot_rank")
     for r in side:
-        if (r.get("ticker")==ticker and r.get("eligible") is True
-                and r.get("choppy") is not True and r.get("late_chase") is not True
-                and r.get("chase")!="HIGH"):
-            return dict(allow=True,reason="top10_matched",score=r.get("score"),asof=snap["bar_cutoff"])
+        if r.get("ticker")!=ticker:
+            continue
+        if r.get("eligible") is not True or r.get("choppy") is True or r.get("late_chase") is True:
+            return dict(allow=False,reason="candidate_not_eligible")
+        if r.get("chase")!="LOW":
+            return dict(allow=False,reason="chase_not_low",chase=r.get("chase"))
+        return dict(allow=True,reason="top10_low_matched",score=r.get("score"),
+                    chase="LOW",asof=snap["bar_cutoff"])
     return dict(allow=False,reason="not_in_directional_top10")
 
 def telegram_decision(store,message,now):
@@ -104,7 +97,7 @@ def telegram_decision(store,message,now):
 def set_enabled(store,enabled,now):
     if type(enabled) is not bool:raise ValueError("boolean required")
     with store.transaction() as tx:
-        control={"enabled":enabled,"updated_at":now.isoformat(),"description":"MC only in Bullish10; SCMP only in Bearish10"}
+        control={"enabled":enabled,"updated_at":now.isoformat(),"description":"MC only Bullish10 LOW; SCMP only Bearish10 LOW"}
         tx.put(CONTROL_KEY,control)
         return control
 
@@ -118,5 +111,13 @@ def status(store,now):
                     refresh_age_sec=(now-updated).total_seconds() if updated else None,
                     top10_bullish=[r["ticker"] for r in snap.get("selected",[]) if r.get("direction")=="BULLISH"],
                     top10_bearish=[r["ticker"] for r in snap.get("selected",[]) if r.get("direction")=="BEARISH"],
-                    entry_filter_only=True,exits_untouched=True,
-                    note="When snapshot stale/missing, new MC/SCMP entry Telegram is filtered; X/SX/HX always pass.")
+                    low_entry_bullish=[r["ticker"] for r in snap.get("selected",[])
+                                       if r.get("direction")=="BULLISH" and r.get("eligible") is True
+                                       and r.get("chase")=="LOW" and r.get("choppy") is not True
+                                       and r.get("late_chase") is not True],
+                    low_entry_bearish=[r["ticker"] for r in snap.get("selected",[])
+                                       if r.get("direction")=="BEARISH" and r.get("eligible") is True
+                                       and r.get("chase")=="LOW" and r.get("choppy") is not True
+                                       and r.get("late_chase") is not True],
+                    entry_filter_only=True,exits_untouched=True,required_chase="LOW",
+                    note="New MC/SCMP requires current directional V3 Top10 AND CHASE LOW. MED stays WATCH-only. Before 08:00 MT LOW is unverified, so entry notifications are filtered. X/SX/HX always pass.")

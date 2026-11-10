@@ -1,18 +1,15 @@
-# MC / SCMP: Scanner Top 10-only Telegram Gate
+# MC / SCMP: Top 10 + CHASE LOW-only Telegram entry gate
 
-Scope: only newly generated MC for current Bullish Top 10, and newly generated SCMP for current Bearish Top 10.
+**Only new MC for Bullish Top 10 + CHASE LOW, and new SCMP for Bearish Top 10 + CHASE LOW.** MED is still on the Top 10 research WATCH list but is not eligible for MC/SCMP Telegram entry. HIGH and CHOPPY remain disqualified by the Scanner.
 
-- Applies immediately before Telegram transport, using the latest *current-day* Intraday V3 snapshot refreshed on the 5-minute cadence.
-- Gate requires snapshot freshness <=11 minutes, bar-cutoff freshness <=16 minutes, and current candidate eligible=true, chase not HIGH, correct ticker and direction.
-- During 07:30–07:59 MT only, use the current day's 07:20 list: the V2 prior-RTH WATCH picks (or V1 verified picks). Those are **prior-day research context, not same-day verified trade entries**. From 08:00 MT onward, use only the refreshed Intraday V3 5-minute snapshot.
-- Fail closed from 08:00 MT if snapshot is stale, missing or inconsistent. This avoids outside-Top10 alerts but may yield zero MC/SCMP during an outage. Previous-day V2 candidates are never substituted after 08:00.
-- X, SX, HX, DATA_CONFLICT, existing confirmation/cancel/status messages, and all unrelated Swing or Pre-Open messages remain unaffected.
-- Outbox entries blocked by this gate are marked filtered_top20, not sent; legacy direct webhook reports filtered_top20 as status.
-- Enabled by default. Authenticated /intraday-v3 panel, with the existing Webhook key, provides emergency filter OFF/ON toggles. Never paste keys into chat.
-- This cannot create MC/SCMP for tickers outside actual installed TradingView bank coverage. The V3 150-symbol scanner covers more names than some Pine engines.
-- Does not alter DAY or Swing entry generation or X/SX logic, charge Bigdata credits, or verify options spreads.
-- Current producer first-line MC/SCMP entries are classified; future message formats must be added to the classifier so no bypass occurs. Future hardening: use explicit typed outbound event metadata.
+- Runs immediately before Telegram transport from a current-day V3 snapshot refreshed every 5 minutes. Requires valid candidate, corresponding direction, eligible=true, choppy=false, late_chase=false, chase exactly LOW, snapshot age <=11 minutes and completed-bar cutoff age <=16 minutes.
+- During **07:30–07:59 MT** the previous-day 07:20 WATCH has no verified same-day CHASE LOW. Thus all classified new MC/SCMP entry notifications are withheld during this window. Starting with a valid Intraday V3 scan from 08:00 MT onward, new MC/SCMP can be delivered if LOW and all other gates pass. We do not infer LOW from prior-day data.
+- Chasing reflects the *distance/impulse relative to ATR, EMA9 and VWAP*, not momentum strength alone. Stronger acceleration can result in MED/HIGH. A consolidation or pullback can reduce chase to LOW, but the candidate must still be eligible and in the correct directional Top 10.
+- **No retroactive send:** an MC/SCMP event blocked when MED is not queued for later delivery when MED turns LOW. Only a *freshly generated* MC/SCMP at the time of LOW can be sent. Scanner WATCH updates do not manufacture MC/SCMP.
+- X, SX, HX, DATA_CONFLICT and other protection/exit, status, confirmation/cancellation, Swing, Pre-Open and overnight messages are unchanged.
+- Filtered entries have auditable outbox status filtered_top20, not sent. Scanner itself and trading/chart calculations are unmodified.
+- The authenticated /intraday-v3 panel shows the required chase=LOW and matching entry-ready subsets. The existing emergency OFF switch bypasses **both** Top 10 and LOW restrictions; re-enable when safe. Do not share webhook/API credentials.
+- A missing or stale scanner snapshot fails closed for new entry Telegram alerts. Installed TradingView coverage remains independent of the Scanner's 150-symbol universe.
+- No additional Bigdata calls or verified options spread; LOW is **not** a win-rate guarantee or evidence that a setup is safe.
 
-Verify in PR CI: python3 -m unittest discover -s tests -p test_top20_entry_gate.py -v
-
-Before trusting a live run, check /intraday-v3 gate status and current Top 10; inspect API send/filtered states and verify X/SX unaffected. A READY deployment is not proof of an end-to-end Telegram signal.
+Validation: run test_top20_entry_gate.py, test_intraday_v3.py and existing preopen/overnight tests in CI, verify production READY on exact merge SHA. After deployment, inspect authenticated gate status and new real Telegram logs. A READY deployment is not an end-to-end delivery proof.
