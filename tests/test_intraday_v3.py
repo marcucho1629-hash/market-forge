@@ -61,6 +61,12 @@ class Core(unittest.TestCase):
         self.assertTrue(r["choppy"])
         self.assertFalse(r["eligible"])
         self.assertGreaterEqual(r["choppiness"],61.8)
+    def test_missing_structure_window_bars_stay_disqualified(self):
+        sample=bars(count=14)
+        del sample[-9]
+        row=v.evaluate("NVDA",sample,OPEN,OPEN+timedelta(minutes=70),spy_move=0)
+        self.assertEqual(row["reason"],"structure_gap")
+        self.assertFalse(row["eligible"])
     def test_clean_trend_not_called_choppy(self):
         r=v.evaluate("NVDA",bars(count=14),OPEN,OPEN+timedelta(minutes=70),spy_move=0)
         self.assertFalse(r["choppy"])
