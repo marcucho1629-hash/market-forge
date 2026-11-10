@@ -81,6 +81,9 @@ class GapTelegramSafety(unittest.TestCase):
     def test_mc_and_exit_messages_still_delivered_while_gap_expires(self):
         expiry=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()
         with self.store.transaction() as tx:
+            # Test the live delivery path, not the 7-day-expired October
+            # research control from the old deterministic market fixture.
+            tx.put(day.CONTROL_KEY,{"enabled":True,"expires_at":expiry})
             tx.enqueue(day.PREFIX+"2026-10-23:TSLA:DATA_GAP:123",
                        dict(text="DAY TEST TSLA 데이터 누락 감지",expires_at=expiry))
             tx.enqueue(day.PREFIX+"2026-10-23:TSLA:1:MC:123",
