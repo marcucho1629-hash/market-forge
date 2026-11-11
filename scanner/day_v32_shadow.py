@@ -197,7 +197,17 @@ def load_1m(symbols,opened,closed):
 def research(timeline,data,opened,closed,now):
     candidates=first_seen(timeline)
     if not timeline:return {"status":"no_5m_observed_records"}
-    if not candidates:return {"status":"no_eligible_5m_candidates","day":DAY,"timeline_count":len(timeline)}
+    if not candidates:
+        return {"status":"ready","day":DAY,"generated_at":now.isoformat(),
+            "mode":"RESEARCH_SHADOW_NOT_LIVE_3M","source":"no_eligible_live_5m_candidates",
+            "universe_5m":150,"unique_1m_replay_symbols":0,
+            "timeline_count":len(timeline),"observed_candidates":0,
+            "counts":{},"per_source":{s:{"observed":0,"confirmed":0} for s in SOURCES},
+            "forward_directional":{str(m):{"positive":0,"covered":0} for m in FORWARD_MINUTES},
+            "quality":{},"events":[],"event_cap":300,"orders":0,
+            "live_mc_scmp":False,"live_3m_alerts":False,"bigdata_calls":0,
+            "limitations":["No eligible 5m candidates actually observed; no 3m replay possible.",
+                           "No artificial forced Top10 or fabricated success."]}
     observed_symbols=sorted({x["ticker"] for x in candidates})
     minute_map={};three_map={};quality={}
     for symbol in observed_symbols:
@@ -280,14 +290,13 @@ def worker(store,send,now):
         timeline=read_timeline(store)
         if not timeline:return {"status":"no_live_5m_observation_no_report"}
         symbols=sorted({r["ticker"] for r in first_seen(timeline)})
-        if not symbols:return {"status":"no_eligible_candidates_no_report","timeline":len(timeline)}
         try:
-            data=load_1m(symbols,opened,closed)
+            data=load_1m(symbols,opened,closed) if symbols else {}
             report=research(timeline,data,opened,closed,now)
         except Exception:
             return {"status":"data_provider_or_evaluation_error"}
         covered=sum(x["one_minute_bars"]>=15 for x in report["quality"].values())
-        if covered==0:return {"status":"no_valid_1m_data_no_report"}
+        if symbols and covered==0:return {"status":"no_valid_1m_data_no_report"}
         report["symbols_with_15_1m_bars"]=covered
         with store.transaction() as tx:
             if tx.get(key) is None:
