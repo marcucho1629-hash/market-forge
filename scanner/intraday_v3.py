@@ -387,5 +387,8 @@ def install(app,storage,send):
         early_outputs=(result.get("delivery",[]) if result.get("status")=="early_open_scanned"
                        else result.get("early_delivery",[]))
         safe["early_delivery_states"]=[x.get("status") for x in early_outputs]
+        # Research-only Nov12 capture receipt. Never log tickers, scores, webhook key.
+        if result.get("v32_capture") is not None:
+            safe["v32_capture"]=result["v32_capture"]
         print("INTRADAY_V3_CRON "+json.dumps(safe,sort_keys=True),flush=True)
         return result
