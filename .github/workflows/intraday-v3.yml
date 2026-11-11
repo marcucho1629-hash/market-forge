@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - "scanner/intraday_v3.py"
+      - "scanner/intraday_early_watch.py"
+      - "tests/test_intraday_early_watch.py"
       - "scanner/day_v31_shadow.py"
       - "scanner/v136_live/engine.py"
       - "tests/test_day_v31_shadow.py"
@@ -35,6 +37,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p 'test_preopen*.py' -v
           python3 -m unittest discover -s tests -p test_intraday_v3.py -v
+          python3 -m unittest discover -s tests -p test_intraday_early_watch.py -v
           python3 -m unittest discover -s tests -p test_top20_entry_gate.py -v
           python3 -m unittest discover -s tests -p test_overnight_watch.py -v
           python3 -m unittest discover -s tests -p test_day_v31_shadow.py -v
