@@ -655,3 +655,8 @@ install_swing_scanner_shadow(app,storage,send_telegram)
 # Once-after-close bank heartbeat / Swing research delivery audit (research only).
 from scanner.swing_delivery_health import install as install_swing_delivery_health
 install_swing_delivery_health(app,storage,send_telegram)
+
+# 11/12 one-day forward-observed 5m Scanner candidate -> EOD completed-3m proxy study.
+# Research only: no Pine/MC/SCMP changes and no live 3m entry alerts.
+from scanner.day_v32_shadow import install as install_day_v32_shadow
+install_day_v32_shadow(app,storage,send_telegram)
