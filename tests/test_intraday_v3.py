@@ -180,7 +180,7 @@ class Worker(unittest.TestCase):
         self.assertNotIn("orders",timeline)
 
     def test_outside_hours_silent(self):
-        result=v.worker(self.store,self.sent.append,OPEN+timedelta(minutes=20))
+        result=v.worker(self.store,self.sent.append,OPEN+timedelta(minutes=10))
         self.assertEqual(result["status"],"outside_intraday_window")
         self.assertFalse(self.sent)
 
