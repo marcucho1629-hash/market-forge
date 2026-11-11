@@ -142,6 +142,43 @@ class Worker(unittest.TestCase):
             report=tx.get("intraday-v3:2026-11-10:latest")
             self.assertEqual(report["baseline"],"PRIOR_HOURLY" if report["at"]!=NOW.isoformat() else "PREOPEN_0720")
             self.assertEqual(len(tx.get("intraday-v3:2026-11-10:history")),1)
+    def test_nov11_shadow_timeline_commits_and_hourly_telegram_sends(self):
+        # Regression for Nov 11-only code path: missing "chosen" used to
+        # roll back both the scanner report and 8AM Telegram enqueue.
+        next_open=OPEN+timedelta(days=1)
+        next_now=NOW+timedelta(days=1)
+        session=dict(date="2026-11-11",open="09:30",close="16:00")
+        shift=lambda seq:[dict(row,t=(datetime.fromisoformat(row["t"])+timedelta(days=1)).isoformat())
+                          for row in seq]
+        universe=["SPY","NVDA","HIMS"]
+        dataset=dict(SPY=shift(bars(1)),NVDA=shift(bars(1)),HIMS=shift(bars(-1)))
+        with patch.object(v,"calendar",return_value=(session,None)),patch.object(
+                v,"pre_config",return_value={"symbols":universe}),patch.object(
+                v,"gather",return_value=dataset):
+            first=v.worker(self.store,self.sent.append,next_now)
+            self.assertEqual(first["status"],"scanned")
+            self.assertTrue(first["telegram_queued"])
+            self.assertEqual(len(self.sent),1)
+            self.assertIn("INTRADAY V3",self.sent[0])
+            again=v.worker(self.store,self.sent.append,next_now)
+            self.assertEqual(again["status"],"already_scanned")
+            self.assertEqual(len(self.sent),1)
+        end=(next_now-timedelta(seconds=10)).replace(second=0,microsecond=0)
+        end=end-timedelta(minutes=end.minute%5)
+        bucket=int(end.timestamp())//300
+        with self.store.transaction() as tx:
+            snap=tx.get("intraday-v3:2026-11-11:latest")
+            timeline=tx.get("intraday-v3:2026-11-11:timeline:"+str(bucket))
+            send=tx.execute("SELECT status FROM mf_outbox WHERE id=?",
+                            ("intraday-v3:2026-11-11:hour:8:watch",)).fetchone()
+        self.assertEqual(snap["mode"],"WATCH_ONLY")
+        self.assertEqual(timeline["feed"],"IEX_5M")
+        self.assertEqual(timeline["selected"],[
+            {k:p.get(k) for k in ("ticker","direction","score","chase","eligible","choppy","late_chase")}
+            for p in snap["selected"]])
+        self.assertEqual(send[0],"sent")
+        self.assertNotIn("orders",timeline)
+
     def test_outside_hours_silent(self):
         result=v.worker(self.store,self.sent.append,OPEN+timedelta(minutes=20))
         self.assertEqual(result["status"],"outside_intraday_window")

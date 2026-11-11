@@ -241,7 +241,7 @@ def worker(store,send,now):
                     "observed_at":now.isoformat(),"bar_cutoff":end.isoformat(),
                     "selected":[{k:p.get(k) for k in
                                   ("ticker","direction","score","chase","eligible","choppy","late_chase")}
-                                 for p in chosen],
+                                 for p in selected],
                     "ready_count":snap["ready_count"],"feed":"IEX_5M"})
             tx.put(prefix+"done:"+str(bucket),dict(at=now.isoformat(),ready_count=snap["ready_count"]))
             hour_key=prefix+"hour:"+str(local.hour)
