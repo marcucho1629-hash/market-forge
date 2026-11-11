@@ -11,6 +11,10 @@
     {
       "path": "/scanner/v31-shadow/worker",
       "schedule": "7 20,21 * * 1-5"
+    },
+    {
+      "path": "/scanner/swing-shadow/worker",
+      "schedule": "25 20,21 * * 1-5"
     }
   ]
 }
