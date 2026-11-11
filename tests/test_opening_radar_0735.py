@@ -48,7 +48,7 @@ class OpeningRadar(unittest.TestCase):
         self.assertEqual(len(self.sent),1)
         self.assertIn("07:35 OPEN RADAR",self.sent[0])
         self.assertIn("CHASE LOW 검증 전 (UNKNOWN)",self.sent[0])
-        self.assertIn("진입 신호 아님",self.sent[0])
+        self.assertIn("매매 신호 아님",self.sent[0])
         self.assertNotIn("MC/SCMP",self.sent[0])
         with self.store.transaction() as tx:
             self.assertIsNone(tx.get("intraday-v3:"+DATE+":latest"))
