@@ -113,7 +113,7 @@ class Validate(unittest.TestCase):
              "mode":"SWING_RESEARCH_WATCH_ONLY","picks":[],
              "reason_counts":{"daily_trend_conflict":50},
              "universe_count":100,
-             "quality":{str(k):{"daily":65,"hourly":7} for k in range(100)},
+             "coverage":{str(k):{"daily":65,"hourly":7} for k in range(100)},
              "bigdata_calls":0,"orders":0}
         with patch.object(s,"completed_session",return_value=(DAY,CLOSE)),patch.object(s,"analyze",return_value=fake):
             first=s.worker(db,sent.append,NOW)
