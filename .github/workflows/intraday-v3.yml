@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - "scanner/intraday_v3.py"
+      - "scanner/day_v32_shadow.py"
+      - "tests/test_day_v32_shadow.py"
       - "scanner/intraday_early_watch.py"
       - "scanner/opening_radar_0735.py"
       - "tests/test_opening_radar_0735.py"
@@ -44,3 +46,4 @@ jobs:
           python3 -m unittest discover -s tests -p test_top20_entry_gate.py -v
           python3 -m unittest discover -s tests -p test_overnight_watch.py -v
           python3 -m unittest discover -s tests -p test_day_v31_shadow.py -v
+          python3 -m unittest discover -s tests -p test_day_v32_shadow.py -v
