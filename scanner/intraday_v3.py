@@ -208,7 +208,8 @@ def gather(symbols,start,end):
 
 def worker(store,send,now):
     local=now.astimezone(DENVER)
-    if local.weekday()>=5 or local.hour<7 or local.hour>13 or (local.hour==7 and local.minute<35):
+    opening_minute=35 if local.date().isoformat()>=STRONG_START_DATE else 45
+    if local.weekday()>=5 or local.hour<7 or local.hour>13 or (local.hour==7 and local.minute<opening_minute):
         return dict(status="outside_intraday_window")
     today,_=calendar(now)
     if not today:return dict(status="market_closed")
