@@ -13,6 +13,16 @@ from .preopen.runtime import fetch
 from .store import drain
 from .intraday_early_watch import opening_worker,live_low_alert
 from .opening_radar_0735 import worker as opening_radar_worker
+from .day_v32_shadow import capture as capture_v32, DAY as V32_DAY
+
+def shadow_capture_safe(store,day,now,end,source,picks):
+    # Never let a research capture failure suppress operational hourly Top10
+    # or early watch Telegram delivery. Explicit status in cron observability.
+    if day!=V32_DAY:return "not_target_day"
+    try:
+        return capture_v32(store,day,now,end,source,picks)["status"]
+    except Exception:
+        return "research_capture_failed"
 
 PREFIX="intraday-v3:"
 MAX_PER_SIDE=10
@@ -222,14 +232,32 @@ def worker(store,send,now):
         end=min(now-timedelta(seconds=10),closed)
         end=end.replace(second=0,microsecond=0)-timedelta(minutes=end.minute%5)
         if today["date"]>=STRONG_START_DATE and end<=opened+timedelta(minutes=10):
-            return opening_radar_worker(store,send,now,opened,end,today["date"],
-                                        PREFIX+today["date"]+":",
-                                        pre_config()["symbols"],gather)
+            result=opening_radar_worker(store,send,now,opened,end,today["date"],
+                                         PREFIX+today["date"]+":",
+                                         pre_config()["symbols"],gather)
+            if today["date"]==V32_DAY and result.get("status")=="radar_scanned":
+                try:
+                    with store.transaction() as tx:
+                        saved=tx.get(PREFIX+today["date"]+":early:radar:latest")
+                    result["v32_capture"]=shadow_capture_safe(
+                        store,today["date"],now,end,"OPEN_RADAR",saved.get("items",[]) if saved else [])
+                except Exception:
+                    result["v32_capture"]="research_capture_failed"
+            return result
         if end<opened+timedelta(minutes=15):
             return dict(status="early_open_waiting")
-        return opening_worker(store,send,now,opened,end,today["date"],
+        result=opening_worker(store,send,now,opened,end,today["date"],
                               PREFIX+today["date"]+":",
                               pre_config()["symbols"],gather)
+        if today["date"]==V32_DAY and result.get("status")=="early_open_scanned":
+            try:
+                with store.transaction() as tx:
+                    saved=tx.get(PREFIX+today["date"]+":early:open:latest")
+                result["v32_capture"]=shadow_capture_safe(
+                    store,today["date"],now,end,"OPEN_EARLY",saved.get("selected",[]) if saved else [])
+            except Exception:
+                result["v32_capture"]="research_capture_failed"
+        return result
     if not opened+timedelta(minutes=30)<=now<=closed:
         return dict(status="outside_session")
     end=min(now-timedelta(seconds=10),closed)
@@ -287,6 +315,9 @@ def worker(store,send,now):
                 tx.put(prefix+"history",history[-8:])
                 tx.enqueue(hour_key+":watch",dict(text=message(snap),expires_at=(now+timedelta(minutes=15)).isoformat()))
             tx.put(prefix+"lease",{})
+        # Independent research capture is separate from the scanner's
+        # operational transaction, so errors cannot block Top10 delivery.
+        research_capture=shadow_capture_safe(store,day,now,end,"5M_STRONG_ALL",rows)
         # EARLY WATCH is deliberately isolated in its own transaction.
         # If experimental alerts fail, hourly Top10 must still send normally.
         try:
@@ -304,7 +335,8 @@ def worker(store,send,now):
                     bearish=sum(p["direction"]=="BEARISH" for p in selected),
                     telegram_queued=should_send,delivery=delivery,bigdata_calls=0,
                     early_new=early.get("new",0),early_queued=early.get("queued",False),
-                    early_delivery=early_delivery,early_error=early.get("error"))
+                    early_delivery=early_delivery,early_error=early.get("error"),
+                    v32_capture=research_capture)
     except Exception:
         with store.transaction() as tx:
             if tx.get(prefix+"lease",{}).get("token")==token:tx.put(prefix+"lease",{})
