@@ -328,9 +328,8 @@ def install(app,storage,send):
                                         "telegram_queued","bigdata_calls",
                                         "early_new","early_queued")}
         safe["delivery_states"]=[x.get("status") for x in result.get("delivery",[])]
-        safe["early_delivery_states"]=[x.get("status") for x in
-                                      result.get("early_delivery",result.get("delivery",[]))] if
-                                      result.get("status")=="early_open_scanned" else [
-                                          x.get("status") for x in result.get("early_delivery",[])]
+        early_outputs=(result.get("delivery",[]) if result.get("status")=="early_open_scanned"
+                       else result.get("early_delivery",[]))
+        safe["early_delivery_states"]=[x.get("status") for x in early_outputs]
         print("INTRADAY_V3_CRON "+json.dumps(safe,sort_keys=True),flush=True)
         return result
