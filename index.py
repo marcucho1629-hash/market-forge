@@ -647,3 +647,7 @@ install_overnight_watch(app, storage, send_telegram)
 # Research-only, no changes to live Pine/DAY/MC/SCMP/X/SX paths.
 from scanner.day_v31_shadow import install as install_day_v31_shadow
 install_day_v31_shadow(app, storage, send_telegram)
+
+# Independent post-close Swing WATCH research. No Pine/DAY/Legacy Swing modifications.
+from scanner.swing_scanner_shadow import install as install_swing_scanner_shadow
+install_swing_scanner_shadow(app,storage,send_telegram)
