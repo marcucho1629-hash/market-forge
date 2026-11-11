@@ -1,0 +1,21 @@
+# Swing Scanner Shadow | 2–3 and 5–10 trading-day WATCH
+
+The user reported that the TradingView Swing indicator produces no notifications. The legacy 100-symbol Pine has 13 separate chart banks with **sendCompare=false by default**, each bank requires its own configured alert rule. Price/indicator eligibility is also demanding (Daily EMA trends, weekly/4h and SPY market direction, hourly breakout + volume, strong anti-chase and 1.5R room). Current production's authenticated bank intake and Telegram path are separate from the chart's execution, and the historical missing-alert cause is **not proven**. Draft PR #9 addresses intake and observability but is not part of this change.
+
+## Independent discovery, NOT a replacement for execution signals
+
+- Use the same 100 bank-symbol universe from `swing_compare.BANKS` as a shared comparison baseline. Fetch **Alpaca native IEX 1Day** bars (up to 280 calendar days) and **1Hour regular-session** bars (15 calendar days) independently of Pine/TradingView alert rules. Reject future/duplicate/invalid bars, stale daily series, incomplete 1h series, unavailable SPY reference, low IEX dollar notional and excessive price extension. Do **not** fabricate bars or fall back silently to SIP.
+- Compute trend/EMA10/20/50, daily RSI14, ATR14, 10-day trend efficiency/CHOPPY, short-term 1h momentum, 5-day SPY-relative strength, weekly movement, and explicit first-failed condition. Two WATCH horizons: **2–3 trading days** and **5–10 trading days**. They are not two guaranteed outcomes or predictions.
+- Generate up to **5 Bullish + 5 Bearish per horizon**, with no forced quota. More restrictive 2–3day H1 trigger, more extended 5–10day Daily + 5-day trend filter. Separate candidate scores and per-horizon rejection counts. Unknown earnings, option volume/spread and Bigdata catalysts must remain **UNKNOWN**. IEX is not market-wide consolidated volume and may reject liquid names.
+- Operator dashboard `GET /swing-scanner-shadow`: password-protected POST current stored research output, or manual **read-only** preview of latest completed regular session. Existing Webhook key only; do not share credentials.
+- Native Vercel Pro Cron path `/scanner/swing-shadow/worker` at 20:25 UTC and 21:25 UTC Monday–Friday. Server checks America/Denver **14:25–14:39 MT** and last completed NYSE close, so the wrong daylight-saving slot is ignored. **One message/day** research-only Telegram with idempotent durable outbox. The 1:40 PM Overnight WATCH and all Swing chart PLAN/ENTRY/EXIT alerts remain separate.
+- Fail closed on provider errors or fewer than 50 ticker daily feeds, with no fake-success Telegram. Every send labelled `SWING SCANNER SHADOW`, not trade entry signal. No orders, DAY, original Swing, MC/SCMP/exit, Top10/Bull/Bear filters or Bigdata paid calls are changed.
+- This scan finds **potential candidates**, not market-proven 2–3/5–10-day profits. Separate weeks of shadow evaluation, end-of-day timestamp tracking, earnings/sector/option checks and historical candidate outcomes must precede any promotion to real signals. Daily close snapshots generated after close are not forward-looking intra-session discoveries.
+
+## Why no old Swing alerts?
+
+The presence of no Telegram Swing messages by itself does not prove the strict Technical chart logic blocked the alert. Check status in the existing authenticated `/swing-compare` dashboard, 13 bank receipts, each TradingView configured alert, authenticated HTTP 401/422 rejection, queue and delivery status. The old production `/swing-compare` lacks robust per-bank diagnostics until PR #9 is reviewed/tested. Never interpret no Vercel matching log line as proof of no requests.
+
+## Testing
+
+`python3 -m unittest discover -s tests -p test_swing_scanner_shadow.py -v` and `test_swing_clock.py`. After green CI and READY deployment, check the new CRON route, a manual 100-symbol preview, the next actual recorded output and Telegram send state. READY does not prove market data scan and Telegram acceptance occurred.
