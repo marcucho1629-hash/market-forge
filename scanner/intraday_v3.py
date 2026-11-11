@@ -11,6 +11,7 @@ from .free_iex import DENVER,bounds,calendar,utc,auth
 from .preopen.core import config as pre_config,validate
 from .preopen.runtime import fetch
 from .store import drain
+from .intraday_early_watch import opening_worker,live_low_alert
 
 PREFIX="intraday-v3:"
 MAX_PER_SIDE=10
@@ -194,11 +195,21 @@ def gather(symbols,start,end):
 
 def worker(store,send,now):
     local=now.astimezone(DENVER)
-    if local.weekday()>=5 or local.hour<8 or local.hour>13:
+    if local.weekday()>=5 or local.hour<7 or local.hour>13 or (local.hour==7 and local.minute<45):
         return dict(status="outside_intraday_window")
     today,_=calendar(now)
     if not today:return dict(status="market_closed")
     opened,closed=bounds(today)
+    if local.hour==7:
+        # First 15–25 closed minutes; isolated provisional WATCH, not V3 Top10
+        # or MC/SCMP state. Normal intraday evaluate still needs six bars.
+        if not opened+timedelta(minutes=15)<=now<opened+timedelta(minutes=30):
+            return dict(status="early_open_waiting")
+        end=min(now-timedelta(seconds=10),closed)
+        end=end.replace(second=0,microsecond=0)-timedelta(minutes=end.minute%5)
+        return opening_worker(store,send,now,opened,end,today["date"],
+                              PREFIX+today["date"]+":",
+                              pre_config()["symbols"],gather)
     if not opened+timedelta(minutes=30)<=now<=closed:
         return dict(status="outside_session")
     end=min(now-timedelta(seconds=10),closed)
@@ -254,11 +265,24 @@ def worker(store,send,now):
                 tx.put(prefix+"history",history[-8:])
                 tx.enqueue(hour_key+":watch",dict(text=message(snap),expires_at=(now+timedelta(minutes=15)).isoformat()))
             tx.put(prefix+"lease",{})
+        # EARLY WATCH is deliberately isolated in its own transaction.
+        # If experimental alerts fail, hourly Top10 must still send normally.
+        try:
+            with store.transaction() as tx:
+                early=live_low_alert(tx,prefix,selected,bucket,now,end,should_send)
+        except Exception:
+            early=dict(new=0,queued=False,error="early_alert_failure")
         delivery=drain(store,send,prefix=prefix+"hour:",now=now,limit=2) if should_send else []
+        try:
+            early_delivery=drain(store,send,prefix=prefix+"early:live:msg:",now=now,limit=2)
+        except Exception:
+            early_delivery=[]
         return dict(status="scanned",asof=end.isoformat(),ready=snap["ready_count"],
                     bullish=sum(p["direction"]=="BULLISH" for p in selected),
                     bearish=sum(p["direction"]=="BEARISH" for p in selected),
-                    telegram_queued=should_send,delivery=delivery,bigdata_calls=0)
+                    telegram_queued=should_send,delivery=delivery,bigdata_calls=0,
+                    early_new=early.get("new",0),early_queued=early.get("queued",False),
+                    early_delivery=early_delivery,early_error=early.get("error"))
     except Exception:
         with store.transaction() as tx:
             if tx.get(prefix+"lease",{}).get("token")==token:tx.put(prefix+"lease",{})
@@ -268,7 +292,7 @@ def worker(store,send,now):
 def install(app,storage,send):
     @app.get("/intraday-v3",response_class=HTMLResponse)
     def panel():
-        return '<meta charset="utf-8"><h2>INTRADAY V3 | Bullish 10 / Bearish 10</h2><p>IEX 5분 스캔 · 시간별 WATCH</p><form method="post" action="/intraday-v3/control"><input type="password" name="secret" required placeholder="웹훅 키"><button name="action" value="status">오늘 결과 조회</button><button name="action" value="run">지금 스캔</button><button name="action" value="gate_status">MC/SCMP 필터 상태</button><button name="action" value="gate_off">필터 긴급 해제</button><button name="action" value="gate_on">필터 다시 활성화</button></form><p>매매 주문 없음. 기존 MC/SCMP/X/SX 유지.</p>'
+        return '<meta charset="utf-8"><h2>INTRADAY V3 | Bullish 10 / Bearish 10</h2><p>IEX 5분 스캔 · 시간별 WATCH + 새 CHASE LOW 조기 WATCH (15분 오프닝 포함)</p><form method="post" action="/intraday-v3/control"><input type="password" name="secret" required placeholder="웹훅 키"><button name="action" value="status">오늘 결과 조회</button><button name="action" value="run">지금 스캔</button><button name="action" value="gate_status">MC/SCMP 필터 상태</button><button name="action" value="gate_off">필터 긴급 해제</button><button name="action" value="gate_on">필터 다시 활성화</button></form><p>매매 주문 없음. 기존 MC/SCMP/X/SX 유지.</p>'
     @app.post("/intraday-v3/control",response_class=HTMLResponse)
     async def control(request:Request):
         raw=await request.body()
@@ -286,7 +310,11 @@ def install(app,storage,send):
             with storage().transaction() as tx:
                 result=dict(latest=tx.get(PREFIX+day+":latest"),history=tx.get(PREFIX+day+":history",[]),
                             error=tx.get(PREFIX+day+":last_error"),
-                            deliveries=tx.execute("SELECT id,status FROM mf_outbox WHERE id LIKE ? ORDER BY id",(PREFIX+day+":hour:%",)).fetchall())
+                            early_open=tx.get(PREFIX+day+":early:open:latest"),
+                            early_history=tx.get(PREFIX+day+":early:live:history",[]),
+                            early_open_error=tx.get(PREFIX+day+":early:open:error"),
+                            deliveries=tx.execute("SELECT id,status FROM mf_outbox WHERE id LIKE ? ORDER BY id",(PREFIX+day+":hour:%",)).fetchall(),
+                            early_deliveries=tx.execute("SELECT id,status FROM mf_outbox WHERE id LIKE ? ORDER BY id",(PREFIX+day+":early:%",)).fetchall())
         else:raise HTTPException(400,"Invalid action")
         return '<meta charset="utf-8"><h2>V3 현재 결과</h2><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre><a href="/intraday-v3">Back</a>'
     @app.get("/scanner/intraday-v3/worker")
@@ -296,7 +324,13 @@ def install(app,storage,send):
             raise HTTPException(401,"Unauthorized")
         result=worker(storage(),send,utc())
         # Sanitized operational receipt. No token, chat ID, prices or tickers.
-        safe={k:result.get(k) for k in ("status","asof","ready","bullish","bearish","telegram_queued","bigdata_calls")}
+        safe={k:result.get(k) for k in ("status","asof","ready","bullish","bearish",
+                                        "telegram_queued","bigdata_calls",
+                                        "early_new","early_queued")}
         safe["delivery_states"]=[x.get("status") for x in result.get("delivery",[])]
+        safe["early_delivery_states"]=[x.get("status") for x in
+                                      result.get("early_delivery",result.get("delivery",[]))] if
+                                      result.get("status")=="early_open_scanned" else [
+                                          x.get("status") for x in result.get("early_delivery",[])]
         print("INTRADAY_V3_CRON "+json.dumps(safe,sort_keys=True),flush=True)
         return result
