@@ -1,4 +1,5 @@
 // DIAGNOSTIC DRAFT: not compiled or installed. Decision expressions unchanged.
+// SCRIPT ON is not proof an alert rule was created. Requires 13 separate TradingView bank alerts.
 //@version=6
 indicator("Market Forge Swing V1.8 BANK | 100 symbols", overlay=false, dynamic_requests=true)
 // Same V1.7 hourly paper models; 8 symbols per alert, 13 banks.
@@ -482,10 +483,10 @@ for i = 0 to array.size(items)-1
         table.cell(dash,4,i+1,valid ? "CURRENT" : "STALE")
 if barstate.islast
     table.cell(dash,0,0,"SWING BANK "+str.tostring(bank))
-    table.cell(dash,1,0,sendCompare ? "WEBHOOK ON" : "OFF")
+    table.cell(dash,1,0,not sendCompare ? "OFF" : webhookKey == "" ? "KEY MISSING" : "SCRIPT ON / VERIFY ALERT")
     table.cell(dash,2,0,"2-5 entry/exit")
     table.cell(dash,3,0,"5-10 entry/exit")
     table.cell(dash,4,0,"Hourly data")
 if barstate.isconfirmed and barstate.isrealtime and session.ismarket and sendCompare and webhookKey != ""
-    payload = '{"schema":"mf.swing.bank.v1","secret":"' + webhookKey + '","bank":' + str.tostring(bank) + ',"emitted_ms":' + str.tostring(timenow) + ',"bar_end_ms":' + str.tostring(time_close) + ',"health":[' + health + '],"events":[' + allEvents + ']}'
+    payload = '{"schema":"mf.swing.bank.v1","pine_version":"swing-bank-v1.8-diagnostic","secret":"' + webhookKey + '","bank":' + str.tostring(bank) + ',"emitted_ms":' + str.tostring(timenow) + ',"bar_end_ms":' + str.tostring(time_close) + ',"health":[' + health + '],"events":[' + allEvents + ']}'
     alert(payload,alert.freq_once_per_bar_close)

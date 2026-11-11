@@ -84,17 +84,26 @@ def ingest_bank(store,data,now):
     for h in health:
         if type(h.get('bar_end_ms')) is not int or type(h.get('ready')) is not bool: raise ValueError('health fields')
     prepared=[]
+    rejected=[]
+    # One malformed model event must not erase unrelated valid symbols in its
+    # authenticated bank heartbeat. Envelope identity/clock/health are still
+    # validated above before anything can be written.
     for event in events:
-        if not isinstance(event,dict) or event.get('ticker') not in allowed or event.get('bar_end_ms')!=data['bar_end_ms']:
-            raise ValueError('event identity')
-        # request.security calculations carry a per-symbol calculation clock.
-        # The authenticated outer envelope is the actual webhook emission clock.
-        computed=event.get('emitted_ms')
-        if type(computed) is not int or computed > data['emitted_ms']+10000:
-            raise ValueError('event clock')
-        normalized=dict(event,source_computed_ms=computed,emitted_ms=data['emitted_ms'])
-        prepared.append(prepare(normalized,now))
-    # Validate the complete batch before any state/queue writes.
+        try:
+            if not isinstance(event,dict) or event.get('ticker') not in allowed or event.get('bar_end_ms')!=data['bar_end_ms']:
+                raise ValueError('event identity')
+            # request.security carries a computed clock, not the delivery clock.
+            computed=event.get('emitted_ms')
+            if type(computed) is not int or computed > data['emitted_ms']+10000:
+                raise ValueError('event clock')
+            normalized=dict(event,source_computed_ms=computed,emitted_ms=data['emitted_ms'])
+            prepared.append(prepare(normalized,now))
+        except (ValueError,TypeError,KeyError,OverflowError) as exc:
+            safe={'event identity','event clock','stale','event time','plan time',
+                  'model identity','action','feed','price','schema or ticker','model'}
+            reason=str(exc) if str(exc) in safe else 'invalid_event'
+            rejected.append(reason)
+    # Commit successful entries and low-cardinality rejection counts together.
     with store.transaction() as tx:
         queued=0
         for key,msg,record in prepared:
@@ -102,10 +111,22 @@ def ingest_bank(store,data,now):
             tx.put(key,record);tx.event(key,now.date().isoformat(),record)
             tx.enqueue(key,{'text':msg,'expires_at':(now+timedelta(seconds=180)).isoformat()})
             tx.put(PREFIX+'latest',record);queued+=1
-        tx.put(PREFIX+'bank:'+str(data['bank']),{'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],'health':health,'events':len(events),'queued':queued})
-        trace={'bank':data['bank'],'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],'emitted_ms':data['emitted_ms'],'health':health,'events':len(events),'queued':queued}
-        tx.put('swing-diagnostic:hour:'+str(data['bank'])+':'+str(data['bar_end_ms']),trace)
-    return {'status':'accepted','bank':data['bank'],'queued':queued}
+        bank=str(data['bank'])
+        trace={'bank':data['bank'],'received_at':now.isoformat(),'bar_end_ms':data['bar_end_ms'],
+               'emitted_ms':data['emitted_ms'],'health':health,'events':len(events),
+               'valid_events':len(prepared),'rejected_events':len(rejected),
+               'rejection_reasons':sorted(set(rejected)),'queued':queued}
+        tx.put(PREFIX+'bank:'+bank,trace)
+        tx.put('swing-diagnostic:hour:'+bank+':'+str(data['bar_end_ms']),trace)
+        if rejected:
+            day=now.astimezone(ZoneInfo('America/New_York')).date().isoformat()
+            key='swing-diagnostic:event-reject:'+day+':'+bank
+            old=tx.get(key,{'count':0,'reasons':{}})
+            reasons=dict(old['reasons'])
+            for reason in rejected: reasons[reason]=reasons.get(reason,0)+1
+            tx.put(key,{'count':old['count']+len(rejected),'reasons':reasons,'last_at':now.isoformat()})
+    return {'status':'partial_accepted' if rejected else 'accepted',
+            'bank':data['bank'],'queued':queued,'rejected_events':len(rejected)}
 
 def install(app,storage,send):
     def authenticate(value):
@@ -127,10 +148,21 @@ def install(app,storage,send):
         fields=parse_qs(raw.decode());authenticate(fields.get('secret',[''])[0])
         now=datetime.now(timezone.utc);store=storage()
         if fields.get('action',[''])[0]=='test':
-            key=PREFIX+'connect:'+now.date().isoformat()
+            # One test per five-minute window. Unlike the previous daily ID,
+            # a second test later today is not silently deduplicated forever.
+            bucket=int(now.timestamp())//300
+            key=PREFIX+'connect:'+now.date().isoformat()+':'+str(bucket)
             with store.transaction() as tx:
-                tx.enqueue(key,{'text':'SWING TEST 연결 테스트\n실제 매매 신호가 아닙니다.\n1시간봉 스윙 비교 알림 전용\n테스트 ID: swing-v17-'+now.date().isoformat(),'expires_at':(now+timedelta(seconds=180)).isoformat()})
-            result={'delivery':drain(store,send,prefix=PREFIX,limit=12)}
+                existing=tx.execute('SELECT status FROM mf_outbox WHERE id=?',(key,)).fetchone()
+                if not existing:
+                    tx.enqueue(key,{'text':'SWING TEST 연결 테스트\n실제 매매 신호가 아닙니다.\n1시간봉 스윙 비교 알림 전용\n테스트 ID: swing-'+str(bucket),'expires_at':(now+timedelta(seconds=180)).isoformat()})
+            attempts=drain(store,send,prefix=PREFIX,limit=12)
+            with store.transaction() as tx:
+                record=tx.execute('SELECT status FROM mf_outbox WHERE id=?',(key,)).fetchone()
+            result={'test_id':key,'already_requested':bool(existing),
+                    'test_delivery_state':record[0] if record else 'missing',
+                    'delivery':attempts,
+                    'note':'sent means Telegram API accepted, not end-user receipt'}
         elif fields.get('action',[''])[0]=='diagnostics':
             result=diagnostics(store,now)
         else:
@@ -172,17 +204,68 @@ def record_rejection(store,data,now,exc):
         pass
 
 def diagnostics(store,now):
-    day=now.astimezone(ZoneInfo('America/New_York')).date().isoformat()
-    start=int(datetime.fromisoformat(day).replace(tzinfo=ZoneInfo('America/New_York')).timestamp()*1000)
-    end=start+86400000
+    """Bounded, read-only per-bank swing audit; never query all DAY events or all outbox rows."""
+    local=now.astimezone(ZoneInfo('America/New_York'))
+    day=local.date().isoformat()
+    midnight=datetime(local.year,local.month,local.day,tzinfo=ZoneInfo('America/New_York'))
+    start=int(midnight.timestamp()*1000)
+    end=int((midnight+timedelta(days=1)).timestamp()*1000)
     with store.transaction() as tx:
-        hours=[json.loads(r[0]) for r in tx.execute("SELECT value FROM mf_kv WHERE key LIKE ?",('swing-diagnostic:hour:%',)).fetchall()]
-        hours=[v for v in hours if start<=v['bar_end_ms']<end]
-        rejected=[json.loads(r[0]) for r in tx.execute("SELECT value FROM mf_kv WHERE key LIKE ?",('swing-diagnostic:reject:'+day+':%',)).fetchall()]
-        events=[v for v in tx.events(day) if v.get('schema')=='mf.swing.compare.v1']
-        deliveries=[{'id':r[0],'status':r[1]} for r in tx.execute("SELECT id,status FROM mf_outbox WHERE id LIKE ?",(PREFIX+'%',)).fetchall()]
+        hours=[]
+        for bank in BANKS:
+            # Indexed primary-key range, limited to this exchange session.
+            prefix='swing-diagnostic:hour:'+str(bank)+':'
+            matches=tx.execute('SELECT value FROM mf_kv WHERE key>=? AND key<? ORDER BY key LIMIT 16',
+                               (prefix+str(start),prefix+str(end))).fetchall()
+            hours.extend(json.loads(r[0]) for r in matches)
+        rejected=[]
+        for bank in BANKS:
+            for namespace in ('swing-diagnostic:reject:', 'swing-diagnostic:event-reject:'):
+                item=tx.get(namespace+day+':'+str(bank))
+                if item:
+                    rejected.append({'bank':bank,'category':'bank_envelope' if namespace.endswith('reject:') and 'event-' not in namespace else 'individual_event',**item})
+        # Event ids start with the 13-digit source bar-end timestamp.
+        events=[json.loads(row[0]) for row in tx.execute(
+            'SELECT payload FROM mf_events WHERE id>=? AND id<? ORDER BY id LIMIT 2000',
+            (PREFIX+str(start),PREFIX+str(end))).fetchall()]
+        deliveries=[{'id':r[0],'status':r[1]} for r in tx.execute(
+            'SELECT id,status FROM mf_outbox WHERE id>=? AND id<? ORDER BY id LIMIT 2000',
+            (PREFIX+str(start),PREFIX+str(end))).fetchall()]
         banks={i:tx.get(PREFIX+'bank:'+str(i)) for i in BANKS}
-    return {'day':day,'banks':banks,'hourly_receipts':hours,'authenticated_rejections':rejected,'trade_events':events,'deliveries':deliveries,
-        'limits':['Hourly receipt history starts with this diagnostic deployment; prior missing hours unknown.',
-                  'Legacy Pine health lacks gate reasons. ready=true is NOT proof that PLAN conditions passed.',
-                  'Authentication failures are not counted by this authenticated diagnostic path.']}
+
+    overview={'expected_banks':len(BANKS),'banks_reporting_today':0,
+              'banks_missing_today':[],'bank_receipts_today':len(hours),
+              'received_candidate_events_today':sum(x.get('events',0) for x in hours),
+              'server_queued_today':sum(x.get('queued',0) for x in hours),
+              'individual_event_rejects_today':sum(x.get('count',0) for x in rejected if x['category']=='individual_event'),
+              'envelope_rejects_today':sum(x.get('count',0) for x in rejected if x['category']=='bank_envelope'),
+              'delivery_by_status':{},'first_block_counts':{},
+              'ready_tickers_latest_by_bank':{}}
+    seen_banks={x['bank'] for x in hours}
+    for bank in BANKS:
+        if bank not in seen_banks:overview['banks_missing_today'].append(bank)
+        elif banks[bank]:
+            overview['ready_tickers_latest_by_bank'][str(bank)]=sum(
+                h.get('ready') is True for h in banks[bank].get('health',[]))
+    overview['banks_reporting_today']=len(seen_banks)
+    for row in hours:
+        for h in row.get('health',[]):
+            diag=h.get('diagnostic')
+            if not isinstance(diag,dict):continue
+            blocks=diag.get('first_blocks',[])
+            if isinstance(blocks,list):
+                for reason in blocks:
+                    if isinstance(reason,str):
+                        overview['first_block_counts'][reason]=overview['first_block_counts'].get(reason,0)+1
+    for row in deliveries:
+        state=row['status']
+        overview['delivery_by_status'][state]=overview['delivery_by_status'].get(state,0)+1
+    return {'day':day,'overview':overview,'banks':banks,
+            'hourly_receipts':hours,'authenticated_rejections':rejected,
+            'trade_events':events,'deliveries':deliveries,
+            'limits':['Bank receipt only confirms HTTP acceptance, not candidate quality or Telegram delivery.',
+                      'A ready ticker can still fail another entry gate; first_blocks are snapshot diagnoses, not calibrated rates.',
+                      'A missing bank may mean TradingView alert OFF, wrong configuration, sender failure or provider downtime.',
+                      'Unauthorized webhook requests cannot be counted by this authenticated diagnostic path.',
+                      'Delivery status sent indicates Telegram API acceptance, not confirmation on the phone.',
+                      'Lists are bounded to this exchange day and 2000 events/deliveries.']}
