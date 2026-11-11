@@ -12,11 +12,15 @@ from .preopen.core import config as pre_config,validate
 from .preopen.runtime import fetch
 from .store import drain
 from .intraday_early_watch import opening_worker,live_low_alert
+from .opening_radar_0735 import worker as opening_radar_worker
 
 PREFIX="intraday-v3:"
 MAX_PER_SIDE=10
-MIN_SCORE=55
+MIN_SCORE=55  # Keep Nov 11 V3.1 replay baseline unchanged.
 MIN_NOTIONAL=500_000
+STRONG_START_DATE="2026-11-12"
+STRONG_TOP10_SCORE=70
+STRONG_MOMENTUM_POINTS=8
 
 def clamp(x):
     return max(0.,min(1.,x))
@@ -131,10 +135,16 @@ def evaluate(sym,bars,opened,end,spy_move=None):
                      else "score_below_minimum"))
     return r
 
-def select(rows):
+def select(rows,strong=False):
     result=[]
     for side in ("BULLISH","BEARISH"):
         pool=[r for r in rows if r.get("eligible") and r["direction"]==side]
+        if strong:
+            pool=[r for r in pool if
+                  r.get("score",0)>=STRONG_TOP10_SCORE and
+                  r.get("chase")=="LOW" and
+                  r.get("points",{}).get("momentum",0)>=STRONG_MOMENTUM_POINTS and
+                  r.get("choppy") is not True and r.get("late_chase") is not True]
         result+=sorted(pool,key=lambda r:(-r["score"],r["chase"]!="LOW",r["ticker"]))[:MAX_PER_SIDE]
     names={r["ticker"] for r in result}
     for row in rows:row["selected"]=row["ticker"] in names
@@ -164,6 +174,9 @@ def message(report):
     lines=[f"MARKET FORGE AI | INTRADAY V3 {mt:%H:%M} MT",
            "IEX 5분 완성봉 · WATCH ONLY (실제 진입 신호 아님)",
            f"데이터 READY {report['ready_count']}/150 · Catalyst UNKNOWN · 옵션 유동성 미검증",""]
+    if report.get("selection_policy")=="STRONG_LOW_V1":
+        lines+=["Top10: 70점 이상 + 모멘텀 8/15 이상 + CHASE LOW",
+                "조건 미달은 순위에서 제외 · 빈 목록 유지",""]
     for direction,header in (("BULLISH","🟢 BULLISH TOP 10"),("BEARISH","🔴 BEARISH TOP 10")):
         picks=[p for p in report["selected"] if p["direction"]==direction]
         lines.append(header+f" · {len(picks)}/10")
@@ -195,18 +208,25 @@ def gather(symbols,start,end):
 
 def worker(store,send,now):
     local=now.astimezone(DENVER)
-    if local.weekday()>=5 or local.hour<7 or local.hour>13 or (local.hour==7 and local.minute<45):
+    opening_minute=35 if local.date().isoformat()>=STRONG_START_DATE else 45
+    if local.weekday()>=5 or local.hour<7 or local.hour>13 or (local.hour==7 and local.minute<opening_minute):
         return dict(status="outside_intraday_window")
     today,_=calendar(now)
     if not today:return dict(status="market_closed")
     opened,closed=bounds(today)
     if local.hour==7:
-        # First 15–25 closed minutes; isolated provisional WATCH, not V3 Top10
-        # or MC/SCMP state. Normal intraday evaluate still needs six bars.
-        if not opened+timedelta(minutes=15)<=now<opened+timedelta(minutes=30):
+        # Only one confirmed RTH 5m bar at 07:35 MT; next cron at ~07:37.
+        # Keep RADAR (unknown chase) separate from EARLY WATCH and entry gates.
+        if not opened+timedelta(minutes=5)<=now<opened+timedelta(minutes=30):
             return dict(status="early_open_waiting")
         end=min(now-timedelta(seconds=10),closed)
         end=end.replace(second=0,microsecond=0)-timedelta(minutes=end.minute%5)
+        if today["date"]>=STRONG_START_DATE and end<=opened+timedelta(minutes=10):
+            return opening_radar_worker(store,send,now,opened,end,today["date"],
+                                        PREFIX+today["date"]+":",
+                                        pre_config()["symbols"],gather)
+        if end<opened+timedelta(minutes=15):
+            return dict(status="early_open_waiting")
         return opening_worker(store,send,now,opened,end,today["date"],
                               PREFIX+today["date"]+":",
                               pre_config()["symbols"],gather)
@@ -227,7 +247,8 @@ def worker(store,send,now):
         spy=validate(all_bars.get("SPY",[]),5,opened,end)
         spy_move=change([r["c"] for r in spy]) if len(spy)>=7 else None
         rows=[evaluate(sym,all_bars[sym],opened,end,spy_move) for sym in symbols]
-        selected=select(rows)
+        strong_policy=day>=STRONG_START_DATE
+        selected=select(rows,strong=strong_policy)
         with store.transaction() as tx:
             last=tx.get(prefix+"hourly_last")
             if last is None:
@@ -242,7 +263,8 @@ def worker(store,send,now):
                       selected=selected,rows=rows,statuses=statuses,removed=removed,
                       baseline="PREOPEN_0720" if last is None else "PRIOR_HOURLY",
                       spy_recent_change_pct=round(spy_move,3) if spy_move is not None else None,
-                      feed="iex",mode="WATCH_ONLY",bigdata_calls=0,orders=0)
+                      feed="iex",mode="WATCH_ONLY",bigdata_calls=0,orders=0,
+                      selection_policy="STRONG_LOW_V1" if strong_policy else "LEGACY_V3")
             tx.put(prefix+"latest",snap)
             # Immutable decision-time ledger for next-day 3m Shadow comparison.
             # Store only already-observed watch candidates, not all 150 rows.
@@ -292,7 +314,7 @@ def worker(store,send,now):
 def install(app,storage,send):
     @app.get("/intraday-v3",response_class=HTMLResponse)
     def panel():
-        return '<meta charset="utf-8"><h2>INTRADAY V3 | Bullish 10 / Bearish 10</h2><p>IEX 5분 스캔 · 시간별 WATCH + 새 CHASE LOW 조기 WATCH (15분 오프닝 포함)</p><form method="post" action="/intraday-v3/control"><input type="password" name="secret" required placeholder="웹훅 키"><button name="action" value="status">오늘 결과 조회</button><button name="action" value="run">지금 스캔</button><button name="action" value="gate_status">MC/SCMP 필터 상태</button><button name="action" value="gate_off">필터 긴급 해제</button><button name="action" value="gate_on">필터 다시 활성화</button></form><p>매매 주문 없음. 기존 MC/SCMP/X/SX 유지.</p>'
+        return '<meta charset="utf-8"><h2>INTRADAY V3 | Bullish 10 / Bearish 10</h2><p>IEX 5분 스캔 · 7:35 초기 RADAR (다음 거래일 적용) + 점수/모멘텀 강화 LOW-only Top10</p><form method="post" action="/intraday-v3/control"><input type="password" name="secret" required placeholder="웹훅 키"><button name="action" value="status">오늘 결과 조회</button><button name="action" value="run">지금 스캔</button><button name="action" value="gate_status">MC/SCMP 필터 상태</button><button name="action" value="gate_off">필터 긴급 해제</button><button name="action" value="gate_on">필터 다시 활성화</button></form><p>매매 주문 없음. 기존 MC/SCMP/X/SX 유지.</p>'
     @app.post("/intraday-v3/control",response_class=HTMLResponse)
     async def control(request:Request):
         raw=await request.body()
@@ -311,6 +333,8 @@ def install(app,storage,send):
                 result=dict(latest=tx.get(PREFIX+day+":latest"),history=tx.get(PREFIX+day+":history",[]),
                             error=tx.get(PREFIX+day+":last_error"),
                             early_open=tx.get(PREFIX+day+":early:open:latest"),
+                            opening_radar=tx.get(PREFIX+day+":early:radar:latest"),
+                            opening_radar_error=tx.get(PREFIX+day+":early:radar:error"),
                             early_history=tx.get(PREFIX+day+":early:live:history",[]),
                             early_open_error=tx.get(PREFIX+day+":early:open:error"),
                             deliveries=tx.execute("SELECT id,status FROM mf_outbox WHERE id LIKE ? ORDER BY id",(PREFIX+day+":hour:%",)).fetchall(),
