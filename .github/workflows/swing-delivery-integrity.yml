@@ -3,6 +3,10 @@ on:
   pull_request:
     paths:
       - "scanner/swing_compare.py"
+      - "scanner/swing_delivery_health.py"
+      - "tests/test_swing_delivery_health.py"
+      - "index.py"
+      - "vercel.json"
       - "tests/test_swing_clock.py"
       - ".github/workflows/swing-delivery-integrity.yml"
 permissions:
@@ -20,4 +24,6 @@ jobs:
       - name: Install API test dependencies
         run: python3 -m pip install --disable-pip-version-check -r requirements.txt
       - name: Swing ingest and diagnostics regression tests
-        run: python3 -m unittest discover -s tests -p test_swing_clock.py -v
+        run: |
+          python3 -m unittest discover -s tests -p test_swing_clock.py -v
+          python3 -m unittest discover -s tests -p test_swing_delivery_health.py -v

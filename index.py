@@ -651,3 +651,7 @@ install_day_v31_shadow(app, storage, send_telegram)
 # Independent post-close Swing WATCH research. No Pine/DAY/Legacy Swing modifications.
 from scanner.swing_scanner_shadow import install as install_swing_scanner_shadow
 install_swing_scanner_shadow(app,storage,send_telegram)
+
+# Once-after-close bank heartbeat / Swing research delivery audit (research only).
+from scanner.swing_delivery_health import install as install_swing_delivery_health
+install_swing_delivery_health(app,storage,send_telegram)
