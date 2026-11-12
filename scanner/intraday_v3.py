@@ -14,6 +14,16 @@ from .store import drain
 from .intraday_early_watch import opening_worker,live_low_alert
 from .opening_radar_0735 import worker as opening_radar_worker
 from .day_v32_shadow import capture as capture_v32, DAY as V32_DAY
+from .day_v33_early_flip_shadow import capture as capture_v33, DAY as V33_DAY
+
+def shadow_capture_v33_safe(store,day,now,end,source,rows):
+    # Date-gated independent research journal. Errors never suppress live
+    # Top10/early Telegram or alter Pine/MC/exit position logic.
+    if day!=V33_DAY:return "not_target_day"
+    try:
+        return capture_v33(store,day,now,end,source,rows)["status"]
+    except Exception:
+        return "research_capture_failed"
 
 def shadow_capture_safe(store,day,now,end,source,picks):
     # Never let a research capture failure suppress operational hourly Top10
@@ -243,6 +253,14 @@ def worker(store,send,now):
                         store,today["date"],now,end,"OPEN_RADAR",saved.get("items",[]) if saved else [])
                 except Exception:
                     result["v32_capture"]="research_capture_failed"
+            if today["date"]==V33_DAY and result.get("status")=="radar_scanned":
+                try:
+                    with store.transaction() as tx:
+                        stored=tx.get(PREFIX+today["date"]+":early:radar:latest")
+                    result["v33_capture"]=shadow_capture_v33_safe(
+                        store,today["date"],now,end,"OPEN_RADAR",stored.get("items",[]) if stored else [])
+                except Exception:
+                    result["v33_capture"]="research_capture_failed"
             return result
         if end<opened+timedelta(minutes=15):
             return dict(status="early_open_waiting")
@@ -257,6 +275,14 @@ def worker(store,send,now):
                     store,today["date"],now,end,"OPEN_EARLY",saved.get("selected",[]) if saved else [])
             except Exception:
                 result["v32_capture"]="research_capture_failed"
+        if today["date"]==V33_DAY and result.get("status")=="early_open_scanned":
+            try:
+                with store.transaction() as tx:
+                    stored=tx.get(PREFIX+today["date"]+":early:open:latest")
+                result["v33_capture"]=shadow_capture_v33_safe(
+                    store,today["date"],now,end,"OPEN_EARLY",stored.get("selected",[]) if stored else [])
+            except Exception:
+                result["v33_capture"]="research_capture_failed"
         return result
     if not opened+timedelta(minutes=30)<=now<=closed:
         return dict(status="outside_session")
@@ -318,6 +344,7 @@ def worker(store,send,now):
         # Independent research capture is separate from the scanner's
         # operational transaction, so errors cannot block Top10 delivery.
         research_capture=shadow_capture_safe(store,day,now,end,"5M_STRONG_ALL",rows)
+        v33_research=shadow_capture_v33_safe(store,day,now,end,"FIVE_MIN",rows)
         # EARLY WATCH is deliberately isolated in its own transaction.
         # If experimental alerts fail, hourly Top10 must still send normally.
         try:
@@ -336,7 +363,7 @@ def worker(store,send,now):
                     telegram_queued=should_send,delivery=delivery,bigdata_calls=0,
                     early_new=early.get("new",0),early_queued=early.get("queued",False),
                     early_delivery=early_delivery,early_error=early.get("error"),
-                    v32_capture=research_capture)
+                    v32_capture=research_capture,v33_capture=v33_research)
     except Exception:
         with store.transaction() as tx:
             if tx.get(prefix+"lease",{}).get("token")==token:tx.put(prefix+"lease",{})
@@ -390,5 +417,7 @@ def install(app,storage,send):
         # Research-only Nov12 capture receipt. Never log tickers, scores, webhook key.
         if result.get("v32_capture") is not None:
             safe["v32_capture"]=result["v32_capture"]
+        if result.get("v33_capture") is not None:
+            safe["v33_capture"]=result["v33_capture"]
         print("INTRADAY_V3_CRON "+json.dumps(safe,sort_keys=True),flush=True)
         return result
