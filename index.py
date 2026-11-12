@@ -660,3 +660,7 @@ install_swing_delivery_health(app,storage,send_telegram)
 # Research only: no Pine/MC/SCMP changes and no live 3m entry alerts.
 from scanner.day_v32_shadow import install as install_day_v32_shadow
 install_day_v32_shadow(app,storage,send_telegram)
+
+# 2026-11-13 only: Early/FLIP/Profit Protection research, never live entry/exit.
+from scanner.day_v33_early_flip_shadow import install as install_day_v33_shadow
+install_day_v33_shadow(app,storage,send_telegram)
