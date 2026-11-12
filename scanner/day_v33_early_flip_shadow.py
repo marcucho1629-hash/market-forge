@@ -33,6 +33,13 @@ def capture(store,day,observed_at,cutoff,source,rows):
     if day!=DAY or source not in SOURCES:return {"status":"outside_study"}
     if not observed_at.tzinfo or not cutoff.tzinfo or cutoff>observed_at:
         raise ValueError("bad_observation_clock")
+    # Never backdate a live observation, use an unclosed 5m bar or silently
+    # rewrite the Nov12 freeze when callers pass the wrong local session.
+    if (observed_at.astimezone(ET).date().isoformat()!=day
+            or cutoff.astimezone(ET).date().isoformat()!=day
+            or observed_at-cutoff>timedelta(minutes=10)
+            or cutoff.second or cutoff.microsecond or cutoff.minute%5):
+        raise ValueError("stale_or_wrong_session_cutoff")
     if source=="FIVE_MIN":
         picks=[]
         for r in rows:
