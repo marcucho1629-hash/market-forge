@@ -149,27 +149,35 @@ def transitions(first_strong,five):
                                     direction=initial,reason=reason)
     return first_weak,first_flip
 
-def prices_after(start,side,price,rows):
-    """Native 1m +/- 30-minute hypothetical excursions, no entry fills."""
-    result=dict(covered_minutes=0,mfe_30_pct=None,mae_30_pct=None,
+def prices_after(observed_at,side,_prior_5m_price,rows):
+    """Conservative next-minute OHLC reference after receipt; NEVER backfill 5m close.
+
+    IEX 1m bars are fetched post-close, and even next-minute 'open' is not a
+    verified fill; this is an illustrative hypothetical price path only.
+    """
+    result=dict(covered_minutes=0,reference_1m_open=None,reference_at=None,
+                mfe_30_pct=None,mae_30_pct=None,
                 signed_close_30_pct=None,giveback_30_pct=None)
-    if not isinstance(price,(int,float)) or price<=0:return result
-    t=stamp(start)
+    t=stamp(observed_at).replace(second=0,microsecond=0)+timedelta(minutes=1)
     within=[r for r in rows if t<=stamp(r["t"])<t+timedelta(minutes=30)]
-    if not within:return result
-    signs=1 if side=="BULLISH" else -1
-    if signs==1:
+    if not within or stamp(within[0]["t"])!=t:return result
+    price=within[0]["o"]
+    if not isinstance(price,(int,float)) or price<=0:return result
+    result["reference_1m_open"]=round(price,4)
+    result["reference_at"]=t.isoformat()
+    sign=1 if side=="BULLISH" else -1
+    if sign==1:
         best=max(r["h"] for r in within);worst=min(r["l"] for r in within)
     else:
         best=min(r["l"] for r in within);worst=max(r["h"] for r in within)
-    result["mfe_30_pct"]=round(100*signs*(best/price-1),3)
-    result["mae_30_pct"]=round(100*signs*(worst/price-1),3)
+    result["mfe_30_pct"]=round(100*sign*(best/price-1),3)
+    result["mae_30_pct"]=round(100*sign*(worst/price-1),3)
     result["covered_minutes"]=len(within)
     exact={stamp(r["t"])+timedelta(minutes=1):r["c"] for r in within}
     final=exact.get(t+timedelta(minutes=30))
     if final is not None and len(within)==30 and all(
             stamp(r["t"])==t+timedelta(minutes=i) for i,r in enumerate(within)):
-        signed=100*signs*(final/price-1)
+        signed=100*sign*(final/price-1)
         result["signed_close_30_pct"]=round(signed,3)
         result["giveback_30_pct"]=round(max(0,result["mfe_30_pct"]-signed),3)
     return result
@@ -243,7 +251,7 @@ def analyze(entries,data,opened,closed,now):
                     "3m proxy is post-close and not original TradingView MC/SCMP Pine strategy.",
                     "Radar CHASE remains UNKNOWN; no inferred LOW or execution.",
                     "IEX 1m bars are not SIP/BATS, spreads/option liquidity/slippage/earnings not validated.",
-                    "30m giveback is a hypothetical path quantity, not actual profits or protected exits.",
+                    "30m giveback uses NEXT minute IEX open after arrival as hypothetical reference, not old 5m close or a verified fill.",
                     "No changes to live DAY/Pine X/SX/HX protective exit logic."])
 
 def telegram(report):
