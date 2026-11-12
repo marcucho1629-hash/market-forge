@@ -52,6 +52,11 @@ class Ledger(unittest.TestCase):
         self.assertEqual(x.capture(self.store,"2026-11-12",at,at,"FIVE_MIN",[])["status"],"outside_study")
         with self.assertRaises(ValueError):
             x.capture(self.store,x.DAY,at,at+timedelta(minutes=5),"FIVE_MIN",[])
+        with self.assertRaises(ValueError):
+            x.capture(self.store,x.DAY,at-timedelta(days=1),
+                      at-timedelta(days=1,minutes=2),"FIVE_MIN",[])
+        with self.assertRaises(ValueError):
+            x.capture(self.store,x.DAY,at,at-timedelta(minutes=1),"FIVE_MIN",[])
         self.assertEqual(x.timeline(self.store),[])
     def test_early_radar_chase_is_unknown_not_low(self):
         at=OPEN+timedelta(minutes=7)
