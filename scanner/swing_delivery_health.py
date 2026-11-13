@@ -26,6 +26,7 @@ def assess(store,now):
     with store.transaction() as tx:
         existing={i:tx.get(SWING_BANK_PREFIX+"bank:"+str(i)) for i in BANKS}
         scanner=tx.get(SWING_SCAN_PREFIX+day+":report")
+        scanner_error=tx.get(SWING_SCAN_PREFIX+day+":last_error",{})
         record=tx.execute("SELECT status FROM mf_outbox WHERE id=?",
                           (SWING_SCAN_PREFIX+day+":telegram",)).fetchone()
         rejected={i:tx.get("swing-diagnostic:reject:"+day+":"+str(i)) for i in BANKS}
@@ -51,6 +52,8 @@ def assess(store,now):
                 queued_latest=total_queued,
                 bank_envelope_rejections=sum(x.get("count",0) for x in rejected.values() if x),
                 shadow_status="recorded" if scanner else "not_recorded",
+                shadow_error_status=scanner_error.get("status"),
+                shadow_error_causes=scanner_error.get("causes",{}),
                 shadow_picks=len(scanner["picks"]) if scanner else None,
                 shadow_delivery=record[0] if record else "not_queued",
                 limitations=[
@@ -78,6 +81,12 @@ def message(report):
     else:
         lines.append("13개 Bank 수신 확인 · 후보/전송 상태 추가 확인")
     status=report["shadow_status"]
+    if status!="recorded" and report.get("shadow_error_status"):
+        lines.append("Swing Shadow 오류: "+str(report["shadow_error_status"]))
+        causes=report.get("shadow_error_causes",{})
+        if causes:
+            lines.append("데이터 실패 유형: "+", ".join(
+                k+" "+str(v) for k,v in sorted(causes.items())[:4]))
     lines.extend(["",f'Server Swing Shadow: {status} · 후보 {report["shadow_picks"] if report["shadow_picks"] is not None else "UNKNOWN"}',
                   f'Shadow Telegram outbox: {report["shadow_delivery"]}',
                   "독립 Swing WATCH는 매매 진입 신호가 아닙니다.",
