@@ -5,6 +5,8 @@ on:
       - "scanner/intraday_v3.py"
       - "scanner/day_v32_shadow.py"
       - "scanner/day_v33_early_flip_shadow.py"
+      - "scanner/day_v34_early_flip_freshness.py"
+      - "tests/test_day_v34_early_flip_freshness.py"
       - "tests/test_day_v33_early_flip_shadow.py"
       - "tests/test_day_v32_shadow.py"
       - "scanner/intraday_early_watch.py"
@@ -50,3 +52,4 @@ jobs:
           python3 -m unittest discover -s tests -p test_day_v31_shadow.py -v
           python3 -m unittest discover -s tests -p test_day_v32_shadow.py -v
           python3 -m unittest discover -s tests -p test_day_v33_early_flip_shadow.py -v
+          python3 -m unittest discover -s tests -p test_day_v34_early_flip_freshness.py -v
