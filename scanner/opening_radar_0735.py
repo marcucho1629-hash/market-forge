@@ -85,7 +85,7 @@ def message(picks,now,end):
     if len(msg)>3900:raise ValueError("radar_telegram_limit")
     return msg
 
-def worker(store,send,now,opened,end,day,prefix,symbols,gather):
+def worker(store,send,now,opened,end,day,prefix,symbols,gather,observer=None):
     if end not in (opened+timedelta(minutes=5),opened+timedelta(minutes=10)):
         return {"status":"radar_waiting_for_0735"}
     token=str(uuid.uuid4())
@@ -102,6 +102,13 @@ def worker(store,send,now,opened,end,day,prefix,symbols,gather):
         market=gather(symbols,opened,end)
         spy=market.get("SPY",[])
         rows=[evaluate(s,market.get(s,[]),spy,opened,end) for s in symbols if s!="SPY"]
+        # Optional date-limited research tap gets all real raw RTH bars,
+        # including those rejected as CHASE or mixed two-bar direction.
+        # Failure must never suppress live opening alerts.
+        observer_state=None
+        if observer is not None:
+            try:observer_state=observer(market)
+            except Exception:observer_state="research_capture_failed"
         qualified=[r for r in rows if r["eligible"]]
         qualified=sorted(qualified,key=lambda r:(-r["relative_spy_pct"],-r["iex_notional"],r["ticker"]))
         with store.transaction() as tx:
@@ -121,8 +128,10 @@ def worker(store,send,now,opened,end,day,prefix,symbols,gather):
             tx.put(done,{"at":now.isoformat(),"count":len(qualified)})
             tx.put(leasekey,{})
         delivery=drain(store,send,prefix=prefix+"early:radar:msg:",now=now,limit=2)
-        return {"status":"radar_scanned","asof":end.isoformat(),"eligible":len(qualified),
+        result={"status":"radar_scanned","asof":end.isoformat(),"eligible":len(qualified),
                 "new":len(fresh),"telegram_queued":bool(fresh),"delivery":delivery}
+        if observer is not None:result["research_observer"]=observer_state
+        return result
     except Exception:
         with store.transaction() as tx:
             if tx.get(leasekey,{}).get("token")==token:

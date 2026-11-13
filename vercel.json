@@ -27,6 +27,10 @@
     {
       "path": "/scanner/day-v33-shadow/worker",
       "schedule": "52 20,21 * * 1-5"
+    },
+    {
+      "path": "/scanner/day-v34-shadow/worker",
+      "schedule": "52 20,21 * * 1-5"
     }
   ]
 }

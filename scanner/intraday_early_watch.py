@@ -109,7 +109,7 @@ def live_watch_text(picks,now,end):
     if len(text)>3900:raise ValueError("live_watch_message_limit")
     return text
 
-def opening_worker(store,send,now,opened,end,day,prefix,symbols,gather):
+def opening_worker(store,send,now,opened,end,day,prefix,symbols,gather,observer=None):
     # Today's first open early scans cannot reuse 08+ V3 Top10/entry gate state.
     if not (opened+timedelta(minutes=15)<=end<=opened+timedelta(minutes=25)):
         return dict(status="early_open_waiting")
@@ -132,6 +132,12 @@ def opening_worker(store,send,now,opened,end,day,prefix,symbols,gather):
             ) else None
         rows=[opening_candidate(symbol,market.get(symbol,[]),opened,end,spy_move)
               for symbol in symbols if symbol!="SPY"]
+        # Research tap observes raw 5m first-wave bars regardless of whether
+        # they pass live EARLY WATCH gates; isolated from Telegram delivery.
+        observer_state=None
+        if observer is not None:
+            try:observer_state=observer(market)
+            except Exception:observer_state="research_capture_failed"
         qualified=[r for r in rows if r["eligible"]]
         chosen=sorted(qualified,key=lambda r:(-r["score"],-r["relative_spy_pct"],r["ticker"]))
         with store.transaction() as tx:
@@ -150,8 +156,10 @@ def opening_worker(store,send,now,opened,end,day,prefix,symbols,gather):
             tx.put(key,dict(at=now.isoformat(),qualified=len(qualified)))
             tx.put(prefix+"early:open:lease",{})
         delivered=drain(store,send,prefix=prefix+"early:open:msg:",now=now,limit=2)
-        return dict(status="early_open_scanned",qualified=len(qualified),new=len(fresh),
+        result=dict(status="early_open_scanned",qualified=len(qualified),new=len(fresh),
                     telegram_queued=bool(fresh),delivery=delivered,asof=end.isoformat())
+        if observer is not None:result["research_observer"]=observer_state
+        return result
     except Exception:
         with store.transaction() as tx:
             if tx.get(prefix+"early:open:lease",{}).get("token")==token:
