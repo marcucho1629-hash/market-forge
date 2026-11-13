@@ -15,6 +15,16 @@ from .intraday_early_watch import opening_worker,live_low_alert
 from .opening_radar_0735 import worker as opening_radar_worker
 from .day_v32_shadow import capture as capture_v32, DAY as V32_DAY
 from .day_v33_early_flip_shadow import capture as capture_v33, DAY as V33_DAY
+from .day_v34_early_flip_freshness import capture as capture_v34, DAY as V34_DAY
+
+def shadow_capture_v34_safe(store,day,now,end,source,rows,opened=None,hourly=False):
+    # Independent Nov16 research write; never change production Top10 or
+    # suppress MC/SCMP/X/SX/HX/Telegram on failure.
+    if day!=V34_DAY:return "not_target_day"
+    try:
+        return capture_v34(store,day,now,end,source,rows,opened=opened,hourly=hourly)["status"]
+    except Exception:
+        return "research_capture_failed"
 
 def shadow_capture_v33_safe(store,day,now,end,source,rows):
     # Date-gated independent research journal. Errors never suppress live
@@ -242,9 +252,15 @@ def worker(store,send,now):
         end=min(now-timedelta(seconds=10),closed)
         end=end.replace(second=0,microsecond=0)-timedelta(minutes=end.minute%5)
         if today["date"]>=STRONG_START_DATE and end<=opened+timedelta(minutes=10):
-            result=opening_radar_worker(store,send,now,opened,end,today["date"],
-                                         PREFIX+today["date"]+":",
-                                         pre_config()["symbols"],gather)
+            args=(store,send,now,opened,end,today["date"],
+                  PREFIX+today["date"]+":",pre_config()["symbols"],gather)
+            if today["date"]==V34_DAY:
+                result=opening_radar_worker(*args,observer=lambda raw:
+                    shadow_capture_v34_safe(store,today["date"],now,end,
+                                            "OPEN_RAW",raw,opened=opened))
+                result["v34_capture"]=result.pop("research_observer",None)
+            else:
+                result=opening_radar_worker(*args)
             if today["date"]==V32_DAY and result.get("status")=="radar_scanned":
                 try:
                     with store.transaction() as tx:
@@ -264,9 +280,15 @@ def worker(store,send,now):
             return result
         if end<opened+timedelta(minutes=15):
             return dict(status="early_open_waiting")
-        result=opening_worker(store,send,now,opened,end,today["date"],
-                              PREFIX+today["date"]+":",
-                              pre_config()["symbols"],gather)
+        args=(store,send,now,opened,end,today["date"],
+              PREFIX+today["date"]+":",pre_config()["symbols"],gather)
+        if today["date"]==V34_DAY:
+            result=opening_worker(*args,observer=lambda raw:
+                shadow_capture_v34_safe(store,today["date"],now,end,
+                                        "OPEN_RAW",raw,opened=opened))
+            result["v34_capture"]=result.pop("research_observer",None)
+        else:
+            result=opening_worker(*args)
         if today["date"]==V32_DAY and result.get("status")=="early_open_scanned":
             try:
                 with store.transaction() as tx:
@@ -345,6 +367,8 @@ def worker(store,send,now):
         # operational transaction, so errors cannot block Top10 delivery.
         research_capture=shadow_capture_safe(store,day,now,end,"5M_STRONG_ALL",rows)
         v33_research=shadow_capture_v33_safe(store,day,now,end,"FIVE_MIN",rows)
+        v34_research=shadow_capture_v34_safe(store,day,now,end,"FIVE_MIN",rows,
+                                              hourly=should_send)
         # EARLY WATCH is deliberately isolated in its own transaction.
         # If experimental alerts fail, hourly Top10 must still send normally.
         try:
@@ -363,7 +387,8 @@ def worker(store,send,now):
                     telegram_queued=should_send,delivery=delivery,bigdata_calls=0,
                     early_new=early.get("new",0),early_queued=early.get("queued",False),
                     early_delivery=early_delivery,early_error=early.get("error"),
-                    v32_capture=research_capture,v33_capture=v33_research)
+                    v32_capture=research_capture,v33_capture=v33_research,
+                    v34_capture=v34_research)
     except Exception:
         with store.transaction() as tx:
             if tx.get(prefix+"lease",{}).get("token")==token:tx.put(prefix+"lease",{})
@@ -419,5 +444,7 @@ def install(app,storage,send):
             safe["v32_capture"]=result["v32_capture"]
         if result.get("v33_capture") is not None:
             safe["v33_capture"]=result["v33_capture"]
+        if result.get("v34_capture") is not None:
+            safe["v34_capture"]=result["v34_capture"]
         print("INTRADAY_V3_CRON "+json.dumps(safe,sort_keys=True),flush=True)
         return result
