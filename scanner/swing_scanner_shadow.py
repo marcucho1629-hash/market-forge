@@ -13,7 +13,7 @@ from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse
 from .calendar import schedule
 from .core import ET
-from .free_iex import DENVER,auth,utc
+from .free_iex import DENVER,auth,utc,DataError
 from .preopen.runtime import fetch
 from .store import drain
 from .swing_compare import BANKS
@@ -25,6 +25,29 @@ MAX_PER_SIDE=5
 MIN_BARS=60
 MIN_NOTIONAL=600000
 LIMITS={"2-3":65,"5-10":70}
+
+# Expose only fixed, non-sensitive provider failure categories, never secrets
+# or full API responses in health messages / telemetry.
+SAFE_ERRORS={"alpaca_connection_or_payload_error","alpaca_credentials_missing",
+             "pagination_incomplete","pagination_cycle","bars_invalid",
+             "unexpected_bars","unexpected_symbol"}
+
+def safe_error(exc):
+    if isinstance(exc,DataError):
+        s=str(exc)
+        if s in SAFE_ERRORS:return s
+        if s.startswith("alpaca_http_") and s[12:].isdigit() and len(s[12:])==3:
+            return s
+        return "alpaca_data_error"
+    return "unexpected_"+type(exc).__name__ if type(exc).__name__ in {
+        "ValueError","TypeError","KeyError","TimeoutError"} else "unexpected_error"
+
+class ProviderBatchFailure(Exception):
+    def __init__(self,errors):
+        self.count=len(errors)
+        self.causes=dict(Counter(errors))
+        super().__init__("sanitized_swing_provider_batch_failure")
+
 
 def dt(value):
     return datetime.fromisoformat(value.replace("Z","+00:00"))
@@ -157,12 +180,21 @@ def history(closed):
     jobs += [("hour",batch,"1Hour",closed-timedelta(days=15),closed+timedelta(minutes=5))
              for batch in batches]
     result={"day":{},"hour":{}}
+    failures=[]
     def job(arg):
         kind,syms,frame,start,end=arg
-        return kind,fetch(syms,frame,start,end)
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        for kind,data in pool.map(job,jobs):
-            result[kind].update(data)
+        try:
+            return kind,fetch(syms,frame,start,end),None
+        except Exception as exc:
+            return kind,{},safe_error(exc)
+    # Limit parallel provider work to reduce temporary overload. A whole
+    # missing batch is failure, NOT zero candidate signals.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for kind,data,error in pool.map(job,jobs):
+            if error:failures.append(error)
+            else:result[kind].update(data)
+    if failures:
+        raise ProviderBatchFailure(failures)
     return result
 
 def completed_session(now):
@@ -223,12 +255,40 @@ def worker(store,send,now):
     with store.transaction() as tx:existing=tx.get(key)
     if existing is None:
         try:report=analyze(now)
-        except Exception:return dict(status="data_or_provider_unavailable")
-        if report["status"]!="ready":return dict(status="not_ready")
+        except ProviderBatchFailure as exc:
+            result=dict(status="provider_batch_failed",failed_batches=exc.count,
+                        causes=exc.causes,at=now.isoformat())
+            with store.transaction() as tx:
+                tx.put(PREFIX+day+":last_error",result)
+            return result
+        except Exception as exc:
+            result=dict(status="data_or_evaluation_unavailable",
+                        cause=safe_error(exc),at=now.isoformat())
+            with store.transaction() as tx:
+                tx.put(PREFIX+day+":last_error",result)
+            return result
+        if report["status"]!="ready":
+            return dict(status="not_ready")
         covered=sum(x["daily"]>=MIN_BARS for x in report["coverage"].values())
-        if covered<50:return dict(status="daily_coverage_insufficient",covered=covered)
+        if covered<50:
+            result=dict(status="daily_coverage_insufficient",covered=covered,
+                        at=now.isoformat())
+            with store.transaction() as tx:
+                tx.put(PREFIX+day+":last_error",result)
+            return result
+        # An empty hourly universe would make every trade hypothesis look
+        # invalid even if daily bars arrived; fail closed instead.
+        hourly_covered=sum(x["hourly"]>=9 for x in report["coverage"].values())
+        if hourly_covered<50:
+            result=dict(status="hourly_coverage_insufficient",covered=hourly_covered,
+                        at=now.isoformat())
+            with store.transaction() as tx:
+                tx.put(PREFIX+day+":last_error",result)
+            return result
         with store.transaction() as tx:
             if tx.get(key) is None:
+                tx.put(PREFIX+day+":last_error",dict(status="recovered_or_ok",
+                                                      at=now.isoformat()))
                 tx.put(key,report)
                 tx.enqueue(PREFIX+day+":telegram",{
                    "text":telegram(report),

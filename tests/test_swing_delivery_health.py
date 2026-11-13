@@ -76,6 +76,19 @@ class Health(unittest.TestCase):
         self.assertEqual(x["shadow"],"not_recorded")
         self.assertEqual(x["delivery"],["sent"])
         self.assertIn("Server Swing Shadow: not_recorded",self.sent[0])
+    def test_shadow_error_reason_exposed_without_credentials(self):
+        with self.db.transaction() as tx:
+            tx.put(SHADOW+DAY+":last_error",{
+                "status":"provider_batch_failed",
+                "failed_batches":2,
+                "causes":{"alpaca_http_429":2},
+                "at":NOW.isoformat()})
+        report=h.assess(self.db,NOW)
+        self.assertEqual(report["shadow_error_status"],"provider_batch_failed")
+        message=h.message(report)
+        self.assertIn("Swing Shadow 오류: provider_batch_failed",message)
+        self.assertIn("alpaca_http_429 2",message)
+        self.assertNotIn("Bearer",message)
     def test_weekend_and_early_time_do_not_send(self):
         with patch.object(h,"schedule",return_value={"is_open":True}):
             self.assertEqual(h.worker(self.db,self.sent.append,NOW-timedelta(minutes=15))["status"],
