@@ -664,3 +664,7 @@ install_day_v32_shadow(app,storage,send_telegram)
 # 2026-11-13 only: Early/FLIP/Profit Protection research, never live entry/exit.
 from scanner.day_v33_early_flip_shadow import install as install_day_v33_shadow
 install_day_v33_shadow(app,storage,send_telegram)
+
+# Nov16 research-only 150-symbol opening flip/freshness; no live entry/exit changes.
+from scanner.day_v34_early_flip_freshness import install as install_day_v34_shadow
+install_day_v34_shadow(app,storage,send_telegram)
