@@ -113,7 +113,7 @@ class Validate(unittest.TestCase):
              "mode":"SWING_RESEARCH_WATCH_ONLY","picks":[],
              "reason_counts":{"daily_trend_conflict":50},
              "universe_count":100,
-             "coverage":{str(k):{"daily":65,"hourly":7} for k in range(100)},
+             "coverage":{str(k):{"daily":65,"hourly":12} for k in range(100)},
              "bigdata_calls":0,"orders":0}
         with patch.object(s,"completed_session",return_value=(DAY,CLOSE)),patch.object(s,"analyze",return_value=fake):
             first=s.worker(db,sent.append,NOW)
@@ -127,5 +127,51 @@ class Validate(unittest.TestCase):
         self.assertNotIn("MC",sent[0])
         with db.transaction() as tx:
             self.assertEqual(tx.get(s.PREFIX+DAY+":report")["orders"],0)
+
+class ProviderFailureAudit(unittest.TestCase):
+    def test_alpaca_errors_are_sanitized_before_reporting(self):
+        from scanner.free_iex import DataError
+        self.assertEqual(s.safe_error(DataError("alpaca_http_429")),"alpaca_http_429")
+        self.assertEqual(s.safe_error(DataError("secret=foo")),"alpaca_data_error")
+        self.assertEqual(s.safe_error(ValueError("secret=foo")),"unexpected_ValueError")
+    def test_batch_failure_is_not_reported_as_no_swing_candidates(self):
+        from scanner.free_iex import DataError
+        with patch.object(s,"UNIVERSE",["NVDA"]),patch.object(
+            s,"fetch",side_effect=DataError("alpaca_http_429")):
+            with self.assertRaises(s.ProviderBatchFailure) as caught:
+                s.history(CLOSE)
+        self.assertEqual(caught.exception.count,2)
+        self.assertEqual(caught.exception.causes,{"alpaca_http_429":2})
+    def test_worker_retries_after_transient_provider_failure(self):
+        tmp=tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db=Store(tmp.name+"/swing.sqlite3")
+        sent=[]
+        fake=dict(status="ready",day=DAY,asof=NOW.isoformat(),
+                  picks=[],coverage={str(i):dict(daily=70,hourly=12) for i in range(60)},
+                  reason_counts={},orders=0,bigdata_calls=0)
+        with patch.object(s,"completed_session",return_value=(DAY,CLOSE)),patch.object(
+            s,"analyze",side_effect=[s.ProviderBatchFailure(["alpaca_http_429"]),fake]):
+            failed=s.worker(db,sent.append,NOW)
+            recovered=s.worker(db,sent.append,NOW+timedelta(minutes=7))
+        self.assertEqual(failed["status"],"provider_batch_failed")
+        self.assertEqual(failed["causes"],{"alpaca_http_429":1})
+        self.assertEqual(recovered["status"],"recorded")
+        self.assertEqual(recovered["delivery"],["sent"])
+        self.assertEqual(len(sent),1)
+        with db.transaction() as tx:
+            self.assertEqual(tx.get(s.PREFIX+DAY+":last_error")["status"],"recovered_or_ok")
+    def test_hourly_missing_does_not_fabricate_no_candidates(self):
+        tmp=tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db=Store(tmp.name+"/swing.sqlite3")
+        fake=dict(status="ready",day=DAY,asof=NOW.isoformat(),
+                  picks=[],coverage={str(i):dict(daily=70,hourly=0) for i in range(60)})
+        with patch.object(s,"completed_session",return_value=(DAY,CLOSE)),patch.object(
+            s,"analyze",return_value=fake):
+            result=s.worker(db,lambda *_:None,NOW)
+        self.assertEqual(result["status"],"hourly_coverage_insufficient")
+        with db.transaction() as tx:
+            self.assertIsNone(tx.get(s.PREFIX+DAY+":report"))
 
 if __name__=="__main__":unittest.main()
