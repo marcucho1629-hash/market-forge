@@ -14,7 +14,7 @@
     },
     {
       "path": "/scanner/swing-shadow/worker",
-      "schedule": "25 20,21 * * 1-5"
+      "schedule": "25,32,37 20,21 * * 1-5"
     },
     {
       "path": "/scanner/swing-health/worker",
