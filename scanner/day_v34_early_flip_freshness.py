@@ -161,15 +161,21 @@ def summary(events,now):
                     qualified_count[ticker]+=1
                     low_first.setdefault((ticker,side),dict(at=at.isoformat(),price=r.get("price")))
                 if record.get("hourly") and r.get("selected") and side in ("BULLISH","BEARISH"):
-                    hour_first.setdefault((ticker,side),dict(at=at.isoformat(),price=r.get("price"),
+                    hour_first.setdefault((ticker,side,at.astimezone(DENVER).strftime("%H")),dict(at=at.isoformat(),price=r.get("price"),
                         age_first_low_minutes=round((at-stamp(low_first[(ticker,side)]["at"])).total_seconds()/60,1)
                         if (ticker,side) in low_first else None,
                         session_extension_atr=r.get("session_extension_atr"),
                         chase=r.get("chase")))
     early_flip=[dict(ticker=t,**x) for t,arr in early.items() for x in arr if x["state"]=="EARLY_FLIP_WATCH"]
-    extended=[dict(ticker=t,**x) for t,arr in early.items() for x in arr if x["state"]=="EXTENDED_NO_ENTRY"]
+    extended=[]
+    seen_extended=set()
+    for t,arr in early.items():
+        for x in arr:
+            if x["state"]!="EXTENDED_NO_ENTRY" or (t,x["side"]) in seen_extended:continue
+            seen_extended.add((t,x["side"]))
+            extended.append(dict(ticker=t,**x))
     preceding=[]
-    for (ticker,side),h in hour_first.items():
+    for (ticker,side,_hour),h in hour_first.items():
         prior=[x for x in early.get(ticker,[]) if x["side"]==side and stamp(x["at"])<stamp(h["at"])]
         if prior:
             a=min(prior,key=lambda v:stamp(v["at"]))
@@ -177,7 +183,7 @@ def summary(events,now):
                               first_hour=h["at"],
                               lead_min=round((stamp(h["at"])-stamp(a["at"])).total_seconds()/60,1),
                               early_state=a["state"],hour_chase=h["chase"]))
-    stale_hours=[dict(ticker=t,side=s,**h) for (t,s),h in hour_first.items()
+    stale_hours=[dict(ticker=t,side=s,**h) for (t,s,_hour),h in hour_first.items()
                  if (h["age_first_low_minutes"] is not None and h["age_first_low_minutes"]>15)
                  or (isinstance(h["session_extension_atr"],(int,float))
                      and h["session_extension_atr"]>=EXTENDED_SESSION_ATR)]
@@ -227,8 +233,8 @@ def text_report(r):
         "실제 관측 IEX 5분봉 연구 · 기존 DAY 매매/알림/청산 변경 없음",
         f'장중 RADAR/EARLY 관측 {r["scans"].get("OPEN_RAW",0)}회 · 8시 이후 {r["scans"].get("FIVE_MIN",0)}회',
         f'초반 FLIP WATCH {r["early_flip_count"]}건 · 과도하게 움직인 EXTENDED WATCH {r["early_extended_count"]}건',
-        f'8시 이후 처음 강한 LOW 후보 {r["first_strong_low_count"]}개 · 시간별 첫 표시 {r["first_hourly_count"]}개',
-        f'시간별 이전에 감지된 종목 {r["early_before_hourly_count"]}개 · 시간별 늦은 목록 {r["late_hourly_count"]}개',
+        f'8시 이후 처음 강한 LOW 후보 {r["first_strong_low_count"]}개 · 시간별 목록 표시 {r["first_hourly_count"]}건',
+        f'시간별 표시 중 조기 선행 관측 {r["early_before_hourly_count"]}건 · 늦은 표시 {r["late_hourly_count"]}건',
         f'15분 후 다음 관측 방향 일치 {r["forward_15m_favorable"]}/{r["forward_15m_covered"]} (정확한 15분봉 아님)',
         "실제 주문/진입/청산 없음 · 옵션 유동성/체결비용 미검증",
         "이 결과는 Shadow 성능 관찰이며 매매 성공률이 아닙니다.",
