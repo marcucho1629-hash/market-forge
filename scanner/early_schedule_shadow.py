@@ -14,7 +14,6 @@ from .free_iex import DENVER,calendar,bounds,utc
 from .preopen.core import config,validate,stamp
 from .preopen.runtime import fetch
 from .intraday_early_watch import opening_candidate
-from .day_v34_early_flip_freshness import opening_rows
 
 DAY="2026-11-16"
 PREFIX="early-schedule-shadow:"+DAY+":"
@@ -105,9 +104,12 @@ def flip_five_1m(complete):
     return result
 
 def two_five_5m(complete,opened,cutoff):
+    # Lazy import avoids circular V3.4 EOD aggregator -> early schedule.
+    from .day_v34_early_flip_freshness import opening_rows
     return opening_rows(complete,opened,cutoff)
 
 def three_five_5m(complete,opened,cutoff):
+    from .day_v34_early_flip_freshness import opening_rows
     observed=opening_rows(complete,opened,cutoff)
     spy=complete["SPY"]
     spy_change=_directional_pct(spy[0]["o"],spy[-1]["c"])
