@@ -17,11 +17,18 @@ from .day_v32_shadow import capture as capture_v32, DAY as V32_DAY
 from .day_v33_early_flip_shadow import capture as capture_v33, DAY as V33_DAY
 from .day_v34_early_flip_freshness import capture as capture_v34, DAY as V34_DAY
 
-def shadow_capture_v34_safe(store,day,now,end,source,rows,opened=None,hourly=False):
+def shadow_capture_v34_safe(store,day,now,end,source,rows,opened=None,hourly=False,
+                            selected_tickers=None):
     # Independent Nov16 research write; never change production Top10 or
     # suppress MC/SCMP/X/SX/HX/Telegram on failure.
     if day!=V34_DAY:return "not_target_day"
     try:
+        # Production evaluate() rows DO NOT carry a selected flag: select()
+        # returns a separate list. Overlay only on research COPIES so hourly
+        # Freshness reflects the actual sent Top10 without editing real gates.
+        if source=="FIVE_MIN" and selected_tickers is not None:
+            rows=[dict(row,selected=(row.get("ticker") in selected_tickers))
+                  for row in rows]
         return capture_v34(store,day,now,end,source,rows,opened=opened,hourly=hourly)["status"]
     except Exception:
         return "research_capture_failed"
@@ -368,7 +375,8 @@ def worker(store,send,now):
         research_capture=shadow_capture_safe(store,day,now,end,"5M_STRONG_ALL",rows)
         v33_research=shadow_capture_v33_safe(store,day,now,end,"FIVE_MIN",rows)
         v34_research=shadow_capture_v34_safe(store,day,now,end,"FIVE_MIN",rows,
-                                              hourly=should_send)
+                                              hourly=should_send,
+                                              selected_tickers={p["ticker"] for p in selected})
         # EARLY WATCH is deliberately isolated in its own transaction.
         # If experimental alerts fail, hourly Top10 must still send normally.
         try:
