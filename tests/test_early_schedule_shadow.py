@@ -16,9 +16,9 @@ def candle(i,o,c,frame=1,v=600):
 def sample_minute(n=5):
     flat=[candle(i,100,100) for i in range(n)]
     spy=[candle(i,500,500) for i in range(n)]
-    down=[candle(i,100-.5*i,99.5-.5*i) for i in range(n)]
-    flip_vals=[(100,100.6),(100.6,101),(101,101.1),
-               (101.1,100.4),(100.4,99.6)]
+    down=[candle(i,100-.6*i,99.3-.6*i) for i in range(n)]
+    flip_vals=[(100,100.6),(100.6,101),(101,101.5),
+               (101.5,100.4),(100.4,99.6)]
     flip=[candle(i,o,c) for i,(o,c) in enumerate(flip_vals[:n])]
     return {"SPY":spy,"NVDA":down,"SNDK":flip,
             **{f"TEST{i:03d}":flat for i in range(58)}}
