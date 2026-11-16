@@ -15,6 +15,7 @@ from .core import ET
 from .free_iex import DENVER,auth,utc
 from .preopen.core import validate
 from .store import drain
+from .early_schedule_shadow import phase_summary
 
 DAY="2026-11-16"
 PREFIX="day-v34-early-flip-freshness-shadow:"
@@ -236,6 +237,8 @@ def text_report(r):
         f'8시 이후 처음 강한 LOW 후보 {r["first_strong_low_count"]}개 · 시간별 목록 표시 {r["first_hourly_count"]}건',
         f'시간별 표시 중 조기 선행 관측 {r["early_before_hourly_count"]}건 · 늦은 표시 {r["late_hourly_count"]}건',
         f'15분 후 다음 관측 방향 일치 {r["forward_15m_favorable"]}/{r["forward_15m_covered"]} (정확한 15분봉 아님)',
+        f'별도 7:33/7:35/7:40/7:45 단계 {r.get("early_schedule",{}).get("stages_recorded",0)}/4 기록',
+        f'단계별 첫 탐지→정식 LOW 선행 {r.get("early_schedule",{}).get("early_preceded_strong_low",0)}건 (실거래 아닌 관측)',
         "실제 주문/진입/청산 없음 · 옵션 유동성/체결비용 미검증",
         "이 결과는 Shadow 성능 관찰이며 매매 성공률이 아닙니다.",
         "상세: /day-v34-shadow (기존 웹훅 키 필요)"
@@ -258,6 +261,11 @@ def worker(store,send,now):
         if not events:return dict(status="no_live_observations_no_report")
         report=summary(events,now)
         if report["status"]!="ready":return dict(status="research_not_ready")
+        # The four new early schedule checkpoints are independent; a missing
+        # research ledger cannot suppress the existing V3.4 end-of-day report.
+        try:report["early_schedule"]=phase_summary(store,events)
+        except Exception:
+            report["early_schedule"]={"status":"research_phase_summary_unavailable"}
         with store.transaction() as tx:
             if tx.get(key) is None:
                 tx.put(key,report)
