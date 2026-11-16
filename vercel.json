@@ -31,6 +31,10 @@
     {
       "path": "/scanner/day-v34-shadow/worker",
       "schedule": "52 20,21 * * 1-5"
+    },
+    {
+      "path": "/scanner/early-schedule-shadow/worker",
+      "schedule": "33,34,35,36,40,41,45,46 13,14 * * 1-5"
     }
   ]
 }

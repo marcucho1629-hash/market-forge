@@ -668,3 +668,7 @@ install_day_v33_shadow(app,storage,send_telegram)
 # Nov16 research-only 150-symbol opening flip/freshness; no live entry/exit changes.
 from scanner.day_v34_early_flip_freshness import install as install_day_v34_shadow
 install_day_v34_shadow(app,storage,send_telegram)
+
+# One-day independent 07:33/35/40/45 150-symbol Early Scanner Shadow, no orders/messages.
+from scanner.early_schedule_shadow import install as install_early_schedule_shadow
+install_early_schedule_shadow(app,storage)
