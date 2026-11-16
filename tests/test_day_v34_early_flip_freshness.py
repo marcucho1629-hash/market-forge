@@ -5,6 +5,7 @@ from unittest.mock import patch
 from scanner.store import Store
 from scanner import day_v34_early_flip_freshness as x
 from scanner import opening_radar_0735 as radar
+from scanner import intraday_v3 as live_scanner
 
 OPEN=datetime(2026,11,16,14,30,tzinfo=timezone.utc)
 CLOSE=OPEN+timedelta(hours=6,minutes=30)
@@ -128,6 +129,25 @@ class Ledger(unittest.TestCase):
         self.assertEqual(len(sent),1)
         self.assertIn("기존 DAY 매매/알림/청산 변경 없음",sent[0])
         self.assertIn("EXTENDED WATCH",sent[0])
+    def test_actual_top10_selected_is_overlaid_on_research_copy_only(self):
+        # Operational evaluate rows are not annotated selected=True; the
+        # operational select() result is a DIFFERENT list.
+        at=OPEN+timedelta(minutes=32)
+        raw=[low("NVDA",selected=False,price=160),low("AMD",selected=False,price=535)]
+        original=[dict(r) for r in raw]
+        state=live_scanner.shadow_capture_v34_safe(
+            self.db,x.DAY,at,OPEN+timedelta(minutes=30),
+            "FIVE_MIN",raw,hourly=True,selected_tickers={"NVDA"})
+        self.assertEqual(state,"captured")
+        self.assertEqual(raw,original,"must not mutate live evaluate() or gating rows")
+        rows=x.timeline(self.db)[0]["rows"]
+        values={r["ticker"]:r for r in rows}
+        self.assertTrue(values["NVDA"]["selected"])
+        self.assertFalse(values["AMD"]["selected"])
+        summary=x.summary(x.timeline(self.db),NOW)
+        self.assertEqual(summary["first_hourly_count"],1)
+        self.assertEqual(summary["late_hourly_count"],0)
+
     def test_only_monday_post_close(self):
         self.assertTrue(x.window(NOW))
         self.assertFalse(x.window(NOW-timedelta(minutes=15)))
