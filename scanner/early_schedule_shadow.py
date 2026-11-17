@@ -217,7 +217,7 @@ def direction_message(stage,picks,observed_at,cutoff):
         lines.append(f'{sign} {r["ticker"]} {r["side"]} · ${r["price"]:.2f} '
                      f'· RS {rel:+.2f}% · IEX ${r.get("iex_notional",0)/1000:.0f}K')
     lines.append("확정 방향/수익 보장 아님 · 5·15·30분 후 결과 비교 예정")
-    msg="\\n".join(lines)
+    msg="\n".join(lines)
     if len(msg)>3900:raise ValueError("direction_message_too_long")
     return msg
 
