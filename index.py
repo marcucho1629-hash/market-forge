@@ -669,6 +669,7 @@ install_day_v33_shadow(app,storage,send_telegram)
 from scanner.day_v34_early_flip_freshness import install as install_day_v34_shadow
 install_day_v34_shadow(app,storage,send_telegram)
 
-# One-day independent 07:33/35/40/45 150-symbol Early Scanner Shadow, no orders/messages.
+# Opening 07:33/35/40/45 low-volume live directional notices, NOT orders/entries.
+# Existing 07:37 radar, hourly scanner and MC/SCMP/X/SX/HX remain separate.
 from scanner.early_schedule_shadow import install as install_early_schedule_shadow
-install_early_schedule_shadow(app,storage)
+install_early_schedule_shadow(app,storage,send_telegram)
