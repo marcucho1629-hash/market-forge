@@ -134,6 +134,37 @@ class ProviderFailureAudit(unittest.TestCase):
         self.assertEqual(s.safe_error(DataError("alpaca_http_429")),"alpaca_http_429")
         self.assertEqual(s.safe_error(DataError("secret=foo")),"alpaca_data_error")
         self.assertEqual(s.safe_error(ValueError("secret=foo")),"unexpected_ValueError")
+    def test_large_paged_batches_split_without_dropping_symbols(self):
+        # Alpaca may exhaust the page-token cap for a large multi-symbol
+        # history. Only retry that exact error with a smaller symbol group.
+        from scanner.free_iex import DataError
+        symbols=["X"+str(i) for i in range(20)]
+        calls=[]
+        def provider(group,frame,start,end):
+            calls.append((tuple(group),frame,start,end))
+            if len(group)>8:raise DataError("pagination_incomplete")
+            return {sym:[] for sym in group}
+        with patch.object(s,"UNIVERSE",symbols),patch.object(s,"fetch",side_effect=provider):
+            got=s.history(CLOSE)
+        self.assertEqual(set(got["day"]),set(symbols+["SPY"]))
+        self.assertEqual(set(got["hour"]),set(symbols+["SPY"]))
+        self.assertGreater(len(calls),2)
+        self.assertEqual({f for _,f,_,_ in calls},{"1Day","1Hour"})
+        self.assertTrue(all(len(data)==0 for data in got["day"].values()))
+
+    def test_split_leaf_error_fails_closed_instead_of_using_partial_history(self):
+        from scanner.free_iex import DataError
+        symbols=["X"+str(i) for i in range(20)]
+        def provider(group,frame,start,end):
+            if len(group)>8:raise DataError("pagination_incomplete")
+            if "X0" in group:raise DataError("alpaca_http_429")
+            return {sym:[] for sym in group}
+        with patch.object(s,"UNIVERSE",symbols),patch.object(s,"fetch",side_effect=provider):
+            with self.assertRaises(s.ProviderBatchFailure) as ctx:
+                s.history(CLOSE)
+        self.assertGreater(ctx.exception.count,0)
+        self.assertIn("alpaca_http_429",ctx.exception.causes)
+
     def test_batch_failure_is_not_reported_as_no_swing_candidates(self):
         from scanner.free_iex import DataError
         with patch.object(s,"UNIVERSE",["NVDA"]),patch.object(
