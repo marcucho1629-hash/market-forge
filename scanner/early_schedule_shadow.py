@@ -297,6 +297,17 @@ def worker(store,now,send=None):
     if live_picks:
         delivery=drain(store,send,prefix=LIVE_PREFIX+study_day+":"+step,
                        now=observed_at,limit=1)
+        # Persist actual delivery outcome, not just "queued"; never auto-resend
+        # on ambiguous Telegram timeouts.
+        try:
+            with store.transaction() as tx:
+                actual=tx.get(key)
+                if actual:
+                    actual["live_delivery"]=delivery
+                    actual["telegram_sent"]=any(item["status"]=="sent" for item in delivery)
+                    tx.put(key,actual)
+        except Exception:
+            pass  # Delivery already attempted; no duplicate retry.
     return dict(status="recorded",stage=step,asof=cutoff.isoformat(),
                 observed_at=observed_at.isoformat(),valid_symbols=result["valid_symbols"],
                 states=dict(counts),rejection_reasons=dict(rejects),
@@ -316,7 +327,10 @@ def phase_summary(store,five_history,day=DAY):
         phases[step]=dict(status="recorded",cutoff=record["cutoff"],
             observed_at=record["observed_at"],frame=record["input_frame"],
             valid_symbols=record["valid_symbols"],states=record["states"],
-            rejection_reasons=record.get("rejection_reasons",{}))
+            rejection_reasons=record.get("rejection_reasons",{}),
+            live_candidates=record.get("live_candidates",[]),
+            telegram_sent=record.get("telegram_sent",False),
+            live_delivery=record.get("live_delivery",[]))
         for r in record["rows"]:
             if r["state"] in ("EARLY_MOMENTUM_PRELIM","POSSIBLE_FLIP",
                               "EARLY_FLIP_WATCH","EARLY_MOMENTUM_WATCH",
@@ -345,7 +359,7 @@ def phase_summary(store,five_history,day=DAY):
                 first_strong_low_distinct=len(first_low),
                 early_preceded_strong_low=len(led),lead_examples=led[:MAX_DETAILS],
                 caveats=["Times are actual IEX provider receipt, not theoretical clock time.",
-                         "No entry/exit or standalone intraday Telegram signals.",
+                         "Historical Nov16 had no Telegram; Nov18+ may send capped directional WATCH alerts.",
                          "No synthetic 1m/5m bars; incomplete data means missing stage.",
                          "Initial 3m and 5m flip hypotheses are not confirmed trades."])
 
