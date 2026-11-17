@@ -1,4 +1,4 @@
-"""Nov16 early 7:33 / 7:35 / 7:40 / 7:45 research-only schedule.
+"""Daily early 7:33 / 7:35 / 7:40 / 7:45 research-only schedule.
 
 Four independent completed-bar as-of checkpoints over the configured 150-name
 IEX universe. NO new Telegram, no orders, and no changes to production DAY,
@@ -14,9 +14,15 @@ from .free_iex import DENVER,calendar,bounds,utc
 from .preopen.core import config,validate,stamp
 from .preopen.runtime import fetch
 from .intraday_early_watch import opening_candidate
+from .store import drain
 
-DAY="2026-11-16"
+DAY="2026-11-16"  # historical V3.4 report and regression fixture
+DAILY_START="2026-11-18"  # Nov 17 had no early captures; never backfill
 PREFIX="early-schedule-shadow:"+DAY+":"
+
+def prefix_for(day):
+    """Isolate research snapshots by actual session date; preserve Nov16 keys."""
+    return PREFIX if day==DAY else "early-schedule-shadow:"+day+":"
 TARGETS={"MOMENTUM_0733":(33,"1Min",3),
          "POSSIBLE_FLIP_0735":(35,"1Min",5),
          "CONFIRM_0740":(40,"5Min",10),
@@ -26,6 +32,11 @@ STEP_BY_MINUTE={minute+retry:step for step,(minute,_,__) in TARGETS.items()
 MIN_UNIVERSE_VALID=50
 MIN_IEX_NOTIONAL=60000
 MAX_DETAILS=40
+LIVE_START="2026-11-18"
+LIVE_PREFIX="early-direction-live:"
+MAX_LIVE_DAILY=10
+LIVE_PER_STAGE={"MOMENTUM_0733":4,"POSSIBLE_FLIP_0735":2,
+                "CONFIRM_0740":2,"EARLY_150_0745":3}
 
 def fetch_universe(symbols,frame,start,end):
     groups=[symbols[i:i+50] for i in range(0,len(symbols),50)]
@@ -100,13 +111,17 @@ def flip_five_1m(complete):
                            price=round(b[-1]["c"],4),session_pct=round(session_move,3),
                            first_2m_pct=round(first,3),last_2m_pct=round(last,3),
                            spy_relative_pct=round(relative,3),
-                           extended=extended))
+                           extended=extended,iex_notional=round(notional)))
     return result
+
+def opening_notional(complete,ticker):
+    return round(sum(x["v"]*x["vw"] for x in complete[ticker]))
 
 def two_five_5m(complete,opened,cutoff):
     # Lazy import avoids circular V3.4 EOD aggregator -> early schedule.
     from .day_v34_early_flip_freshness import opening_rows
-    return opening_rows(complete,opened,cutoff)
+    return [dict(item,iex_notional=opening_notional(complete,item["ticker"]))
+            for item in opening_rows(complete,opened,cutoff)]
 
 def three_five_5m(complete,opened,cutoff):
     from .day_v34_early_flip_freshness import opening_rows
@@ -125,6 +140,7 @@ def three_five_5m(complete,opened,cutoff):
                     "EARLY_LOW_WATCH" if qualified else "NOT_QUALIFIED",
               price=item["price"],session_pct=item["session_move_pct"],
               score=row.get("score"),reason=row.get("reason"),
+              iex_notional=opening_notional(complete,ticker),
               chase=row.get("chase","UNKNOWN"),entry=False,bar_count=3))
     return result
 
@@ -145,23 +161,85 @@ def compute(step,market,opened,cutoff):
     else:rows=three_five_5m(complete,opened,cutoff)
     return dict(status="ready",valid_symbols=valid,rows=rows)
 
+def direction_candidates(stage,rows,previous):
+    """Conservative directional notifications, never entry or trade authorization."""
+    approved={
+        "MOMENTUM_0733":{"EARLY_MOMENTUM_PRELIM"},
+        "POSSIBLE_FLIP_0735":{"POSSIBLE_FLIP"},
+        "CONFIRM_0740":{"EARLY_FLIP_WATCH","EARLY_MOMENTUM_WATCH"},
+        "EARLY_150_0745":{"EARLY_LOW_WATCH"},
+    }[stage]
+    pool=[]
+    for r in rows:
+        side=r.get("side")
+        if r.get("state") not in approved or side not in ("BULLISH","BEARISH"):
+            continue
+        if r.get("price",0)<5 or r.get("entry",False):
+            continue
+        if r.get("iex_notional",0)<(60000 if stage in ("MOMENTUM_0733","POSSIBLE_FLIP_0735") else 150000):
+            continue
+        if stage=="MOMENTUM_0733" and abs(r.get("session_pct",0))>1.5:
+            continue
+        if stage=="POSSIBLE_FLIP_0735" and abs(r.get("session_pct",0))>2:
+            continue
+        if stage=="CONFIRM_0740" and (r.get("extended") or r.get("relative_spy_pct",0)<.30):
+            continue
+        if stage=="EARLY_150_0745" and (r.get("chase")!="LOW" or not r.get("score")):
+            continue
+        # One first detection per ticker. A genuine reversed-side flip may
+        # send a correction; no duplicate same-side messages across stages.
+        old=previous.get(r["ticker"])
+        if old and (old["side"]==side or "FLIP" not in r["state"]):
+            continue
+        pool.append(r)
+    pool.sort(key=lambda r:(-r.get("spy_relative_pct",r.get("relative_spy_pct",0)),
+                           -r.get("iex_notional",0),r["ticker"]))
+    if stage=="MOMENTUM_0733":
+        # Prevent one side from crowding out every candidate on the other.
+        picks=[]
+        for side in ("BULLISH","BEARISH"):
+            picks.extend([r for r in pool if r["side"]==side][:2])
+        return picks
+    return pool[:LIVE_PER_STAGE[stage]]
+
+def direction_message(stage,picks,observed_at,cutoff):
+    observed=observed_at.astimezone(DENVER)
+    candle=cutoff.astimezone(DENVER)
+    title={"MOMENTUM_0733":"EARLY MOMENTUM","POSSIBLE_FLIP_0735":"POSSIBLE FLIP",
+           "CONFIRM_0740":"EARLY STRUCTURE","EARLY_150_0745":"LOW SETUP WATCH"}[stage]
+    lines=[f"MARKET FORGE AI | LIVE DIRECTION {observed:%H:%M} MT",
+           f"📡 {title} · 관측봉 {candle:%H:%M} MT 완료",
+           "실시간 방향성 검증 신호 · 주문/MC/SCMP 진입 아님",
+           "촉매 미검증 · 옵션 유동성 미검증 · 추격 진입 금지",""]
+    for r in picks:
+        sign="🟢" if r["side"]=="BULLISH" else "🔴"
+        rel=r.get("spy_relative_pct",r.get("relative_spy_pct",0))
+        lines.append(f'{sign} {r["ticker"]} {r["side"]} · ${r["price"]:.2f} '
+                     f'· RS {rel:+.2f}% · IEX ${r.get("iex_notional",0)/1000:.0f}K')
+    lines.append("확정 방향/수익 보장 아님 · 5·15·30분 후 결과 비교 예정")
+    msg="\n".join(lines)
+    if len(msg)>3900:raise ValueError("direction_message_too_long")
+    return msg
+
 def scheduled_step(now):
     local=now.astimezone(DENVER)
-    if (local.date().isoformat()!=DAY or local.weekday()!=0
-            or local.hour!=7):
+    day=local.date().isoformat()
+    if (local.weekday()>=5 or local.hour!=7
+            or (day!=DAY and day<DAILY_START)):
         return None
     return STEP_BY_MINUTE.get(local.minute)
 
-def worker(store,now):
+def worker(store,now,send=None):
     step=scheduled_step(now)
-    if not step:return dict(status="outside_nov16_study_window")
-    key=PREFIX+step
+    if not step:return dict(status="outside_shadow_study_window")
+    study_day=now.astimezone(DENVER).date().isoformat()
+    key=prefix_for(study_day)+step
     with store.transaction() as tx:prior=tx.get(key)
     if prior is not None:return dict(status="already_captured",stage=step,
                                      observed_at=prior["observed_at"],
                                      qualified=prior["qualified"])
     today,_=calendar(now)
-    if not today or today["date"]!=DAY:return dict(status="market_closed")
+    if not today or today["date"]!=study_day:return dict(status="market_closed")
     opened,closed=bounds(today)
     minutes,frame,cutoff_min=TARGETS[step]
     cutoff=opened+timedelta(minutes=cutoff_min)
@@ -178,25 +256,68 @@ def worker(store,now):
                     spy_complete=result["spy_complete"])
     observed_at=utc()
     counts=Counter(r["state"] for r in result["rows"])
-    entry=dict(stage=step,day=DAY,observed_at=observed_at.isoformat(),
+    rejects=Counter(r.get("reason","unclassified") for r in result["rows"]
+                    if r["state"] in ("NOT_QUALIFIED","EARLY_UNCONFIRMED"))
+    entry=dict(stage=step,day=study_day,observed_at=observed_at.isoformat(),
                cutoff=cutoff.isoformat(),feed="IEX",
                input_frame=frame,universe=len(symbols),
                valid_symbols=result["valid_symbols"],
                qualified=sum(x["state"] not in ("NOT_QUALIFIED","EARLY_UNCONFIRMED")
                              for x in result["rows"]),
-               states=dict(counts),rows=result["rows"],
+               states=dict(counts),rejection_reasons=dict(rejects),
+               rows=result["rows"],
                no_trade=True,telegram_sent=False,orders=0,
                research_only=True)
+    delivery=[]
+    live_picks=[]
+    live_enabled=(send is not None and study_day>=LIVE_START and
+                  0<=(observed_at-cutoff).total_seconds()<=180)
     with store.transaction() as tx:
-        if tx.get(key) is None:tx.put(key,entry)
+        if tx.get(key) is None:
+            if live_enabled:
+                prev=tx.get(LIVE_PREFIX+study_day+":sent",{})
+                budget=max(0,MAX_LIVE_DAILY-len(prev))
+                picks=direction_candidates(step,result["rows"],prev)[:budget]
+                if picks:
+                    msg=direction_message(step,picks,observed_at,cutoff)
+                    alert_id=LIVE_PREFIX+study_day+":"+step
+                    tx.enqueue(alert_id,dict(text=msg,expires_at=(observed_at+
+                                              timedelta(minutes=3)).isoformat()))
+                    live_picks=[dict(ticker=p["ticker"],side=p["side"],
+                                     price=p["price"],state=p["state"])
+                                for p in picks]
+                    for p in picks:
+                        prev[p["ticker"]]=dict(side=p["side"],stage=step,
+                                              at=observed_at.isoformat(),
+                                              first_price=p["price"])
+                    tx.put(LIVE_PREFIX+study_day+":sent",prev)
+            entry["live_candidates"]=live_picks
+            entry["live_queued"]=bool(live_picks)
+            tx.put(key,entry)
+    if live_picks:
+        delivery=drain(store,send,prefix=LIVE_PREFIX+study_day+":"+step,
+                       now=observed_at,limit=1)
+        # Persist actual delivery outcome, not just "queued"; never auto-resend
+        # on ambiguous Telegram timeouts.
+        try:
+            with store.transaction() as tx:
+                actual=tx.get(key)
+                if actual:
+                    actual["live_delivery"]=delivery
+                    actual["telegram_sent"]=any(item["status"]=="sent" for item in delivery)
+                    tx.put(key,actual)
+        except Exception:
+            pass  # Delivery already attempted; no duplicate retry.
     return dict(status="recorded",stage=step,asof=cutoff.isoformat(),
                 observed_at=observed_at.isoformat(),valid_symbols=result["valid_symbols"],
-                states=dict(counts),orders=0,telegram_sent=False)
+                states=dict(counts),rejection_reasons=dict(rejects),
+                live_candidates=live_picks,live_delivery=delivery,
+                orders=0,telegram_sent=any(x["status"]=="sent" for x in delivery))
 
-def phase_summary(store,five_history):
-    """Post-close add-on to Nov16 V3.4 report; no new Telegram message."""
+def phase_summary(store,five_history,day=DAY):
+    """Research add-on; historical V3.4 uses Nov16 unless given a daily date."""
     with store.transaction() as tx:
-        stored=[tx.get(PREFIX+step) for step in TARGETS]
+        stored=[tx.get(prefix_for(day)+step) for step in TARGETS]
     phases={}
     all_early={}
     for step,record in zip(TARGETS,stored):
@@ -205,7 +326,11 @@ def phase_summary(store,five_history):
             continue
         phases[step]=dict(status="recorded",cutoff=record["cutoff"],
             observed_at=record["observed_at"],frame=record["input_frame"],
-            valid_symbols=record["valid_symbols"],states=record["states"])
+            valid_symbols=record["valid_symbols"],states=record["states"],
+            rejection_reasons=record.get("rejection_reasons",{}),
+            live_candidates=record.get("live_candidates",[]),
+            telegram_sent=record.get("telegram_sent",False),
+            live_delivery=record.get("live_delivery",[]))
         for r in record["rows"]:
             if r["state"] in ("EARLY_MOMENTUM_PRELIM","POSSIBLE_FLIP",
                               "EARLY_FLIP_WATCH","EARLY_MOMENTUM_WATCH",
@@ -229,23 +354,23 @@ def phase_summary(store,five_history):
                             lead_minutes=round(delta,1)))
     led.sort(key=lambda r:-r["lead_minutes"])
     return dict(status="ready" if any(stored) else "no_early_captures",
-                date=DAY,stages=phases,stages_recorded=sum(bool(x) for x in stored),
+                date=day,stages=phases,stages_recorded=sum(bool(x) for x in stored),
                 stages_expected=len(TARGETS),early_distinct_directional=len(all_early),
                 first_strong_low_distinct=len(first_low),
                 early_preceded_strong_low=len(led),lead_examples=led[:MAX_DETAILS],
                 caveats=["Times are actual IEX provider receipt, not theoretical clock time.",
-                         "No entry/exit or standalone intraday Telegram signals.",
+                         "Historical Nov16 had no Telegram; Nov18+ may send capped directional WATCH alerts.",
                          "No synthetic 1m/5m bars; incomplete data means missing stage.",
                          "Initial 3m and 5m flip hypotheses are not confirmed trades."])
 
-def install(app,storage):
+def install(app,storage,send=None):
     @app.get("/scanner/early-schedule-shadow/worker")
     def cron(request:Request):
         secret=os.getenv("CRON_SECRET","")
         if not secret or not hmac.compare_digest(
                 request.headers.get("authorization",""),"Bearer "+secret):
             raise HTTPException(401,"Unauthorized")
-        result=worker(storage(),utc())
+        result=worker(storage(),utc(),send=send)
         # Never log webhook secrets, full ticker-level rows, or raw API payloads.
         print("EARLY_SCHEDULE_SHADOW "+json.dumps(result,sort_keys=True),flush=True)
         return result

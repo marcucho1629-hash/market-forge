@@ -187,6 +187,18 @@ def select(rows,strong=False):
     for row in rows:row["selected"]=row["ticker"] in names
     return result
 
+def research_diagnostic(rows,now,end):
+    """Read-only decision-time trace; never influences rank, alert, or entry."""
+    return dict(at=now.isoformat(),bar_cutoff=end.isoformat(),source="IEX_5M",
+        candidates=[dict(ticker=r["ticker"],direction=r.get("direction"),
+            reason=r.get("reason"),score=r.get("score"),chase=r.get("chase"),
+            choppy=r.get("choppy"),late_chase=r.get("late_chase"),
+            momentum=(r.get("points") or {}).get("momentum"),
+            selected=r.get("selected") is True,price=r.get("price"))
+            for r in rows if isinstance(r,dict) and isinstance(r.get("ticker"),str)],
+        reason_counts=dict(Counter(r.get("reason","missing") for r in rows
+                                   if isinstance(r,dict))))
+
 def compare(previous,selected,rows):
     old={x["ticker"]:x["direction"] for x in previous}
     new={x["ticker"]:x["direction"] for x in selected}
@@ -389,6 +401,17 @@ def worker(store,send,now):
             early_delivery=drain(store,send,prefix=prefix+"early:live:msg:",now=now,limit=2)
         except Exception:
             early_delivery=[]
+        # Nov18+ diagnostic-only ledger. Separate write AFTER all operational
+        # selection and Telegram delivery. Failure cannot change live alerts.
+        v35_research="not_target_day"
+        if day>="2026-11-18":
+            try:
+                with store.transaction() as tx:
+                    tx.put(prefix+"research:v35:"+str(bucket),
+                           research_diagnostic(rows,now,end))
+                v35_research="captured"
+            except Exception:
+                v35_research="capture_failed"
         return dict(status="scanned",asof=end.isoformat(),ready=snap["ready_count"],
                     bullish=sum(p["direction"]=="BULLISH" for p in selected),
                     bearish=sum(p["direction"]=="BEARISH" for p in selected),
@@ -396,7 +419,10 @@ def worker(store,send,now):
                     early_new=early.get("new",0),early_queued=early.get("queued",False),
                     early_delivery=early_delivery,early_error=early.get("error"),
                     v32_capture=research_capture,v33_capture=v33_research,
-                    v34_capture=v34_research)
+                    v34_capture=v34_research,v35_research=v35_research,
+                    choppy_count=snap["quality_counts"].get("choppy_chart",0),
+                    late_chase_count=snap["quality_counts"].get("late_chase",0),
+                    chase_block_count=snap["quality_counts"].get("chase_block",0))
     except Exception:
         with store.transaction() as tx:
             if tx.get(prefix+"lease",{}).get("token")==token:tx.put(prefix+"lease",{})
