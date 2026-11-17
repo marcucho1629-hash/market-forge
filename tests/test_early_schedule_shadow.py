@@ -127,6 +127,8 @@ class ResearchStages(unittest.TestCase):
             history=tx.get(e.prefix_for("2026-11-18")+"MOMENTUM_0733")
             self.assertEqual(history["orders"],0)
             self.assertTrue(history["live_candidates"])
+            self.assertTrue(history["telegram_sent"])
+            self.assertEqual(history["live_delivery"][0]["status"],"sent")
             alert=tx.execute("SELECT status FROM mf_outbox WHERE id=?",
                              ("early-direction-live:2026-11-18:MOMENTUM_0733",)).fetchone()
         self.assertEqual(alert[0],"sent")
