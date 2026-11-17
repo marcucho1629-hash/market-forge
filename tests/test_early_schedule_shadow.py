@@ -80,6 +80,25 @@ class ResearchStages(unittest.TestCase):
         self.assertEqual(by_day["date"],"2026-11-18")
         self.assertEqual(e.phase_summary(self.db,[])["stages_recorded"],0)
 
+    def test_five_minute_diagnostic_is_read_only_and_preserves_block_reasons(self):
+        from scanner.intraday_v3 import research_diagnostic
+        rows=[dict(ticker="PANW",direction="BEARISH",reason="qualified",
+                   score=90,selected=True,chase="LOW",choppy=False,
+                   late_chase=False,points=dict(momentum=12),price=304),
+              dict(ticker="CRWD",reason="choppy_chart",selected=False),
+              dict(ticker="TEAM",reason="late_chase",selected=False)]
+        original=[dict(r) for r in rows]
+        now=OPEN+timedelta(minutes=47)
+        end=OPEN+timedelta(minutes=45)
+        recorded=research_diagnostic(rows,now,end)
+        self.assertEqual(rows,original)
+        self.assertEqual(recorded["reason_counts"],
+                         {"qualified":1,"choppy_chart":1,"late_chase":1})
+        self.assertEqual(recorded["candidates"][0]["momentum"],12)
+        self.assertTrue(recorded["candidates"][0]["selected"])
+        self.assertEqual(recorded["candidates"][1]["reason"],"choppy_chart")
+        self.assertEqual(recorded["bar_cutoff"],end.isoformat())
+
     def test_733_completed_first_three_not_entry(self):
         r=e.compute("MOMENTUM_0733",sample_minute(3),OPEN,OPEN+timedelta(minutes=3))
         self.assertEqual(r["status"],"ready",r)
