@@ -121,8 +121,8 @@ class ResearchStages(unittest.TestCase):
         self.assertIn("EARLY MOMENTUM",sent[0])
         self.assertIn("SNDK",sent[0])
         self.assertNotIn("NVDA",sent[0])  # extended initial decline
-        self.assertIn("\\n",sent[0])
-        self.assertNotIn("\\\\n",sent[0])
+        self.assertIn("\n",sent[0])
+        self.assertNotIn("\\n",sent[0])
         with self.db.transaction() as tx:
             history=tx.get(e.prefix_for("2026-11-18")+"MOMENTUM_0733")
             self.assertEqual(history["orders"],0)
