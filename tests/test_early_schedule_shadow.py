@@ -1,4 +1,4 @@
-"""07:33/07:35 1m and 07:40/07:45 5m Shadow, Nov16 only."""
+"""Nov16 historical and Nov18+ daily research-only early Shadow tests."""
 import tempfile
 import unittest
 from datetime import datetime,timedelta,timezone
@@ -47,6 +47,38 @@ class ResearchStages(unittest.TestCase):
             self.assertNotEqual(e.scheduled_step(now+timedelta(minutes=2)),stage)
         self.assertIsNone(e.scheduled_step(OPEN-timedelta(days=1)+timedelta(minutes=3)))
         self.assertIsNone(e.scheduled_step(OPEN+timedelta(days=1,minutes=3)))
+
+    def test_daily_sessions_from_nov18_have_independent_keys_and_no_alerts(self):
+        # Nov17 was a documented gap; do not pretend to backfill it.
+        wed_open=OPEN+timedelta(days=2)
+        wed_now=wed_open+timedelta(minutes=3)
+        self.assertEqual(e.scheduled_step(wed_now),"MOMENTUM_0733")
+        self.assertIsNone(e.scheduled_step(wed_now+timedelta(days=3)))
+        shifted={s:[dict(x,t=(datetime.fromisoformat(x["t"])+timedelta(days=2)).isoformat())
+                    for x in bars] for s,bars in sample_minute(3).items()}
+        session=dict(SESSION,date="2026-11-18")
+        with patch.object(e,"calendar",return_value=(session,None)),patch.object(
+             e,"bounds",return_value=(wed_open,wed_open+timedelta(hours=6,minutes=30))),patch.object(
+             e,"config",return_value={"symbols":list(shifted)}),patch.object(
+             e,"fetch_universe",return_value=shifted),patch.object(
+             e,"utc",return_value=wed_now+timedelta(seconds=6)):
+            first=e.worker(self.db,wed_now)
+            repeated=e.worker(self.db,wed_now+timedelta(minutes=1))
+        self.assertEqual(first["status"],"recorded",first)
+        self.assertEqual(repeated["status"],"already_captured")
+        with self.db.transaction() as tx:
+            snap=tx.get(e.prefix_for("2026-11-18")+"MOMENTUM_0733")
+            old=tx.get(e.PREFIX+"MOMENTUM_0733")
+        self.assertIsNotNone(snap)
+        self.assertIsNone(old)
+        self.assertEqual(snap["day"],"2026-11-18")
+        self.assertEqual(snap["orders"],0)
+        self.assertFalse(snap["telegram_sent"])
+        self.assertIn("rejection_reasons",snap)
+        by_day=e.phase_summary(self.db,[],day="2026-11-18")
+        self.assertEqual(by_day["stages_recorded"],1)
+        self.assertEqual(by_day["date"],"2026-11-18")
+        self.assertEqual(e.phase_summary(self.db,[])["stages_recorded"],0)
 
     def test_733_completed_first_three_not_entry(self):
         r=e.compute("MOMENTUM_0733",sample_minute(3),OPEN,OPEN+timedelta(minutes=3))
