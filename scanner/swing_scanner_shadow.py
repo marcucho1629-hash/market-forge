@@ -181,10 +181,31 @@ def history(closed):
              for batch in batches]
     result={"day":{},"hour":{}}
     failures=[]
+    def fetch_with_bounded_split(syms,frame,start,end,depth=0):
+        """Retry only a paginated-too-large request with smaller symbol groups.
+
+        This uses the same native IEX day/hour bars and fixed timestamp window.
+        Do not treat a failed leaf as an empty group or synthesize any bars.
+        Depth 3 is enough to split a 35-symbol batch into groups of 4-5.
+        """
+        try:
+            data=fetch(syms,frame,start,end)
+            if not isinstance(data,dict) or any(
+                    sym not in data or not isinstance(data[sym],list) for sym in syms):
+                raise DataError("unexpected_bars")
+            return data
+        except DataError as exc:
+            if (str(exc)!="pagination_incomplete" or len(syms)<2 or depth>=3):
+                raise
+            half=len(syms)//2
+            first=fetch_with_bounded_split(syms[:half],frame,start,end,depth+1)
+            second=fetch_with_bounded_split(syms[half:],frame,start,end,depth+1)
+            return {**first,**second}
+
     def job(arg):
         kind,syms,frame,start,end=arg
         try:
-            return kind,fetch(syms,frame,start,end),None
+            return kind,fetch_with_bounded_split(syms,frame,start,end),None
         except Exception as exc:
             return kind,{},safe_error(exc)
     # Limit parallel provider work to reduce temporary overload. A whole
