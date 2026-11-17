@@ -1,4 +1,4 @@
-"""Nov16 early 7:33 / 7:35 / 7:40 / 7:45 research-only schedule.
+"""Daily early 7:33 / 7:35 / 7:40 / 7:45 research-only schedule.
 
 Four independent completed-bar as-of checkpoints over the configured 150-name
 IEX universe. NO new Telegram, no orders, and no changes to production DAY,
@@ -15,8 +15,13 @@ from .preopen.core import config,validate,stamp
 from .preopen.runtime import fetch
 from .intraday_early_watch import opening_candidate
 
-DAY="2026-11-16"
+DAY="2026-11-16"  # historical V3.4 report and regression fixture
+DAILY_START="2026-11-18"  # Nov 17 had no early captures; never backfill
 PREFIX="early-schedule-shadow:"+DAY+":"
+
+def prefix_for(day):
+    """Isolate research snapshots by actual session date; preserve Nov16 keys."""
+    return PREFIX if day==DAY else "early-schedule-shadow:"+day+":"
 TARGETS={"MOMENTUM_0733":(33,"1Min",3),
          "POSSIBLE_FLIP_0735":(35,"1Min",5),
          "CONFIRM_0740":(40,"5Min",10),
@@ -147,21 +152,23 @@ def compute(step,market,opened,cutoff):
 
 def scheduled_step(now):
     local=now.astimezone(DENVER)
-    if (local.date().isoformat()!=DAY or local.weekday()!=0
-            or local.hour!=7):
+    day=local.date().isoformat()
+    if (local.weekday()>=5 or local.hour!=7
+            or (day!=DAY and day<DAILY_START)):
         return None
     return STEP_BY_MINUTE.get(local.minute)
 
 def worker(store,now):
     step=scheduled_step(now)
-    if not step:return dict(status="outside_nov16_study_window")
-    key=PREFIX+step
+    if not step:return dict(status="outside_shadow_study_window")
+    study_day=now.astimezone(DENVER).date().isoformat()
+    key=prefix_for(study_day)+step
     with store.transaction() as tx:prior=tx.get(key)
     if prior is not None:return dict(status="already_captured",stage=step,
                                      observed_at=prior["observed_at"],
                                      qualified=prior["qualified"])
     today,_=calendar(now)
-    if not today or today["date"]!=DAY:return dict(status="market_closed")
+    if not today or today["date"]!=study_day:return dict(status="market_closed")
     opened,closed=bounds(today)
     minutes,frame,cutoff_min=TARGETS[step]
     cutoff=opened+timedelta(minutes=cutoff_min)
@@ -178,25 +185,29 @@ def worker(store,now):
                     spy_complete=result["spy_complete"])
     observed_at=utc()
     counts=Counter(r["state"] for r in result["rows"])
-    entry=dict(stage=step,day=DAY,observed_at=observed_at.isoformat(),
+    rejects=Counter(r.get("reason","unclassified") for r in result["rows"]
+                    if r["state"] in ("NOT_QUALIFIED","EARLY_UNCONFIRMED"))
+    entry=dict(stage=step,day=study_day,observed_at=observed_at.isoformat(),
                cutoff=cutoff.isoformat(),feed="IEX",
                input_frame=frame,universe=len(symbols),
                valid_symbols=result["valid_symbols"],
                qualified=sum(x["state"] not in ("NOT_QUALIFIED","EARLY_UNCONFIRMED")
                              for x in result["rows"]),
-               states=dict(counts),rows=result["rows"],
+               states=dict(counts),rejection_reasons=dict(rejects),
+               rows=result["rows"],
                no_trade=True,telegram_sent=False,orders=0,
                research_only=True)
     with store.transaction() as tx:
         if tx.get(key) is None:tx.put(key,entry)
     return dict(status="recorded",stage=step,asof=cutoff.isoformat(),
                 observed_at=observed_at.isoformat(),valid_symbols=result["valid_symbols"],
-                states=dict(counts),orders=0,telegram_sent=False)
+                states=dict(counts),rejection_reasons=dict(rejects),
+                orders=0,telegram_sent=False)
 
-def phase_summary(store,five_history):
-    """Post-close add-on to Nov16 V3.4 report; no new Telegram message."""
+def phase_summary(store,five_history,day=DAY):
+    """Research add-on; historical V3.4 uses Nov16 unless given a daily date."""
     with store.transaction() as tx:
-        stored=[tx.get(PREFIX+step) for step in TARGETS]
+        stored=[tx.get(prefix_for(day)+step) for step in TARGETS]
     phases={}
     all_early={}
     for step,record in zip(TARGETS,stored):
@@ -205,7 +216,8 @@ def phase_summary(store,five_history):
             continue
         phases[step]=dict(status="recorded",cutoff=record["cutoff"],
             observed_at=record["observed_at"],frame=record["input_frame"],
-            valid_symbols=record["valid_symbols"],states=record["states"])
+            valid_symbols=record["valid_symbols"],states=record["states"],
+            rejection_reasons=record.get("rejection_reasons",{}))
         for r in record["rows"]:
             if r["state"] in ("EARLY_MOMENTUM_PRELIM","POSSIBLE_FLIP",
                               "EARLY_FLIP_WATCH","EARLY_MOMENTUM_WATCH",
@@ -229,7 +241,7 @@ def phase_summary(store,five_history):
                             lead_minutes=round(delta,1)))
     led.sort(key=lambda r:-r["lead_minutes"])
     return dict(status="ready" if any(stored) else "no_early_captures",
-                date=DAY,stages=phases,stages_recorded=sum(bool(x) for x in stored),
+                date=day,stages=phases,stages_recorded=sum(bool(x) for x in stored),
                 stages_expected=len(TARGETS),early_distinct_directional=len(all_early),
                 first_strong_low_distinct=len(first_low),
                 early_preceded_strong_low=len(led),lead_examples=led[:MAX_DETAILS],
