@@ -99,6 +99,60 @@ class ResearchStages(unittest.TestCase):
         self.assertEqual(recorded["candidates"][1]["reason"],"choppy_chart")
         self.assertEqual(recorded["bar_cutoff"],end.isoformat())
 
+    def test_live_direction_telegram_only_with_valid_completed_early_data(self):
+        live_open=OPEN+timedelta(days=2)
+        now=live_open+timedelta(minutes=3,seconds=27)
+        shifted={symbol:[dict(row,t=(datetime.fromisoformat(row["t"])+
+                   timedelta(days=2)).isoformat()) for row in bars]
+                 for symbol,bars in sample_minute(3).items()}
+        sent=[]
+        with patch.object(e,"calendar",return_value=(dict(SESSION,date="2026-11-18"),None)),patch.object(
+             e,"bounds",return_value=(live_open,live_open+timedelta(hours=6,minutes=30))),patch.object(
+             e,"config",return_value={"symbols":list(shifted)}),patch.object(
+             e,"fetch_universe",return_value=shifted),patch.object(
+             e,"utc",return_value=now):
+            result=e.worker(self.db,now,send=sent.append)
+            repeat=e.worker(self.db,now+timedelta(minutes=1),send=sent.append)
+        self.assertEqual(result["status"],"recorded",result)
+        self.assertTrue(result["telegram_sent"],result)
+        self.assertEqual(repeat["status"],"already_captured")
+        self.assertEqual(len(sent),1)
+        self.assertIn("LIVE DIRECTION",sent[0])
+        self.assertIn("EARLY MOMENTUM",sent[0])
+        self.assertIn("SNDK",sent[0])
+        self.assertNotIn("NVDA",sent[0])  # extended initial decline
+        self.assertIn("\\n",sent[0])
+        self.assertNotIn("\\\\n",sent[0])
+        with self.db.transaction() as tx:
+            history=tx.get(e.prefix_for("2026-11-18")+"MOMENTUM_0733")
+            self.assertEqual(history["orders"],0)
+            self.assertTrue(history["live_candidates"])
+            alert=tx.execute("SELECT status FROM mf_outbox WHERE id=?",
+                             ("early-direction-live:2026-11-18:MOMENTUM_0733",)).fetchone()
+        self.assertEqual(alert[0],"sent")
+
+    def test_direction_candidates_reject_chasing_and_repeated_same_side(self):
+        rows=[dict(ticker="PANW",side="BEARISH",state="EARLY_MOMENTUM_PRELIM",
+                   price=300,session_pct=-.9,spy_relative_pct=.85,
+                   iex_notional=850000,entry=False),
+              dict(ticker="CRWD",side="BEARISH",state="EXTENDED_NO_ENTRY",
+                   price=200,session_pct=-3.8,spy_relative_pct=3.0,
+                   iex_notional=2000000,entry=False),
+              dict(ticker="NIO",side="BEARISH",state="EARLY_MOMENTUM_PRELIM",
+                   price=2.8,session_pct=-.9,spy_relative_pct=1.1,
+                   iex_notional=300000,entry=False),
+              dict(ticker="ORCL",side="BULLISH",state="EARLY_MOMENTUM_PRELIM",
+                   price=115,session_pct=.8,spy_relative_pct=1.0,
+                   iex_notional=200000,entry=False)]
+        first=e.direction_candidates("MOMENTUM_0733",rows,{})
+        self.assertEqual({r["ticker"] for r in first},{"PANW","ORCL"})
+        dedup=e.direction_candidates("MOMENTUM_0733",rows,
+                                     {"PANW":{"side":"BEARISH"}})
+        self.assertNotIn("PANW",{r["ticker"] for r in dedup})
+        self.assertEqual(e.direction_candidates("EARLY_150_0745",
+            [dict(ticker="PANW",side="BEARISH",state="EARLY_LOW_WATCH",
+                  price=298,score=90,iex_notional=500000,chase="MED")],{}),[])
+
     def test_733_completed_first_three_not_entry(self):
         r=e.compute("MOMENTUM_0733",sample_minute(3),OPEN,OPEN+timedelta(minutes=3))
         self.assertEqual(r["status"],"ready",r)
