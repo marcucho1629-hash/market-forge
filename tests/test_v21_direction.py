@@ -134,7 +134,7 @@ class Integrated(unittest.TestCase):
 
     def test_five_min_strong_low_scans_even_hour_boundary(self):
         prefix="intraday-v3:"+DAY+":"
-        current=dict(ticker="ABC",direction="BULLISH",score=78,eligible=True,
+        current=dict(ticker="ABC",direction="BULLISH",score=78,price=101.0,eligible=True,
                      chase="LOW",choppy=False,late_chase=False)
         with self.store.transaction() as tx:
             tx.put(prefix+"early:low_previous",
