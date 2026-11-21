@@ -380,7 +380,9 @@ def worker(store,send,now):
                 history=tx.get(prefix+"history",[])
                 history.append(dict(at=now.isoformat(),selected=selected,statuses=statuses,removed=removed))
                 tx.put(prefix+"history",history[-8:])
-                tx.enqueue(hour_key+":watch",dict(text=message(snap),expires_at=(now+timedelta(minutes=15)).isoformat()))
+                # V2.1: preserve hourly baseline/history, mute scheduled Top10 Telegram only.
+                if day < "2026-11-23":
+                    tx.enqueue(hour_key+":watch",dict(text=message(snap),expires_at=(now+timedelta(minutes=15)).isoformat()))
             tx.put(prefix+"lease",{})
         # Independent research capture is separate from the scanner's
         # operational transaction, so errors cannot block Top10 delivery.
@@ -396,7 +398,7 @@ def worker(store,send,now):
                 early=live_low_alert(tx,prefix,selected,bucket,now,end,should_send)
         except Exception:
             early=dict(new=0,queued=False,error="early_alert_failure")
-        delivery=drain(store,send,prefix=prefix+"hour:",now=now,limit=2) if should_send else []
+        delivery=drain(store,send,prefix=prefix+"hour:",now=now,limit=2) if should_send and day < "2026-11-23" else []
         try:
             early_delivery=drain(store,send,prefix=prefix+"early:live:msg:",now=now,limit=2)
         except Exception:
@@ -415,7 +417,7 @@ def worker(store,send,now):
         return dict(status="scanned",asof=end.isoformat(),ready=snap["ready_count"],
                     bullish=sum(p["direction"]=="BULLISH" for p in selected),
                     bearish=sum(p["direction"]=="BEARISH" for p in selected),
-                    telegram_queued=should_send,delivery=delivery,bigdata_calls=0,
+                    telegram_queued=(should_send and day < "2026-11-23"),delivery=delivery,bigdata_calls=0,
                     early_new=early.get("new",0),early_queued=early.get("queued",False),
                     early_delivery=early_delivery,early_error=early.get("error"),
                     v32_capture=research_capture,v33_capture=v33_research,
