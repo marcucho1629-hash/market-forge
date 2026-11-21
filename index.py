@@ -673,3 +673,8 @@ install_day_v34_shadow(app,storage,send_telegram)
 # Existing 07:37 radar, hourly scanner and MC/SCMP/X/SX/HX remain separate.
 from scanner.early_schedule_shadow import install as install_early_schedule_shadow
 install_early_schedule_shadow(app,storage,send_telegram)
+
+# V2.1: 07:40 sent-only premarket recheck + independently monitored Flip WATCH.
+# 5m scanner and existing Pine/MC/SCMP/X/SX/HX are not modified by this module.
+from scanner.v21_direction import install as install_v21_direction
+install_v21_direction(app,storage,send_telegram)

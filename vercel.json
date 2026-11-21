@@ -35,6 +35,14 @@
     {
       "path": "/scanner/early-schedule-shadow/worker",
       "schedule": "33,34,35,36,40,41,45,46 13,14 * * 1-5"
+    },
+    {
+      "path": "/scanner/v21/confirm-worker",
+      "schedule": "41,42,43 13,14 * * 1-5"
+    },
+    {
+      "path": "/scanner/v21/monitor-worker",
+      "schedule": "4-59/5 13-20 * * 1-5"
     }
   ]
 }

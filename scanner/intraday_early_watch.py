@@ -100,7 +100,7 @@ def live_watch_text(picks,now,end):
     lines=[f"MARKET FORGE AI | 5MIN NEW LOW WATCH {local:%H:%M} MT",
            f"완성 5분봉 {cutoff:%H:%M} MT 기준",
            "🟡 새로 포착된 CHASE LOW 후보 · 실제 진입 신호 아님",
-           "기존 시간별 Top 10과 별도 · 옵션/촉매 미검증",""]
+           "5분 신규 후보만 알림 · 옵션/촉매 미검증",""]
     for p in picks:
         code="🟢" if p["direction"]=="BULLISH" else "🔴"
         lines.append(f'{code} {p["ticker"]} {p["direction"]} {p["score"]:.1f} · USD {p["price"]:.2f} · LOW')
@@ -178,12 +178,15 @@ def live_low_alert(tx,prefix,selected,bucket,now,end,should_send):
              and not p.get("choppy") and not p.get("late_chase")}
     previous=tx.get(prefix+"early:low_previous")
     tx.put(prefix+"early:low_previous",dict(asof=end.isoformat(),by_ticker=current))
-    if should_send or not previous:
+    # From V2.1 on, the hourly summary is silent; only the very first scan primes
+    # the baseline. Every subsequent completed 5m bar can surface a fresh LOW.
+    v21=now.astimezone(DENVER).date().isoformat()>="2026-11-23"
+    if not previous or (should_send and not v21):
         return dict(new=0,queued=False,baseline=True)
     prev=previous.get("by_ticker",{})
     observed=[p for p in selected if p["ticker"] in current
               and prev.get(p["ticker"])!=p["direction"]
-              and p["score"]>=MIN_5M_LIVE_SCORE]
+              and p["score"]>=(75 if v21 else MIN_5M_LIVE_SCORE)]
     sent=tx.get(prefix+"early:sent",{})
     budget=max(0,MAX_LIVE_PER_DAY-sum(1 for v in sent.values() if v.get("origin")=="LIVE"))
     fresh=[p for p in sorted(observed,key=lambda r:-r["score"])
