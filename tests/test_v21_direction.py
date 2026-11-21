@@ -144,6 +144,34 @@ class Integrated(unittest.TestCase):
         self.assertEqual(result["new"],1)
         self.assertTrue(result["queued"])
 
+    def test_hourly_top10_silent_but_scanner_baseline_persists(self):
+        from unittest.mock import patch
+        from scanner import intraday_v3 as scanner
+        opened = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+        scan_at = datetime(2026, 11, 23, 15, 42, tzinfo=timezone.utc)
+        bars = []
+        for i in range(14):
+            close = 100 + i * .06
+            op = close - .02
+            bars.append(dict(t=(opened + timedelta(minutes=i * 5)).isoformat(),
+                             o=op, h=close+.08, l=op-.08, c=close,
+                             v=35000, n=100, vw=(close+op)/2))
+        dataset = {"SPY": bars, "ABC": bars}
+        session = dict(date=DAY, open="09:30", close="16:00")
+        with patch.object(scanner, "calendar", return_value=(session, None)), \
+             patch.object(scanner, "pre_config", return_value={"symbols": ["SPY","ABC"]}), \
+             patch.object(scanner, "gather", return_value=dataset):
+            report = scanner.worker(self.store, self.messages.append, scan_at)
+        self.assertEqual(report["status"], "scanned")
+        self.assertFalse(report["telegram_queued"])
+        with self.store.transaction() as tx:
+            self.assertEqual(len(tx.get("intraday-v3:"+DAY+":history", [])), 1)
+            self.assertIsNotNone(tx.get("intraday-v3:"+DAY+":latest"))
+            record = tx.execute("SELECT status FROM mf_outbox WHERE id=?",
+                                ("intraday-v3:"+DAY+":hour:8:watch",)).fetchone()
+            self.assertIsNone(record)
+        self.assertEqual(self.messages, [])
+
     def test_five_min_below_75_not_sent(self):
         prefix="intraday-v3:"+DAY+":"
         weak=dict(ticker="ABC",direction="BULLISH",score=74,eligible=True,
