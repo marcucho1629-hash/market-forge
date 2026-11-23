@@ -132,6 +132,59 @@ class Integrated(unittest.TestCase):
         self.assertEqual(duplicate["status"],"already_monitored")
         self.assertEqual(len(self.messages),2)
 
+    def test_exhausted_weakness_budget_does_not_block_confirmed_flip(self):
+        self.seed_early(True)
+        cutoff=datetime(2026,11,23,15,0,tzinfo=timezone.utc)
+        prefix="v21-direction:"+DAY+":"
+        with self.store.transaction() as tx:
+            tx.put("intraday-v3:"+DAY+":latest",snap(MON,cutoff))
+            tx.put(prefix+"monitor:state",dict(ABC=dict(
+                side="BULLISH", source="MOMENTUM_0733",
+                at="2026-11-23T14:33:27+00:00",
+                warned=True,flipped=False,opposite_streak=1,
+                last_bar=(cutoff-timedelta(minutes=5)).isoformat())))
+            # Previous day's old 20-cap was fully consumed by one-bar warnings.
+            tx.put(prefix+"monitor:notices",[dict(items=[
+                dict(kind="WEAKNESS",ticker=f"OLD{i}") for i in range(20)])])
+        result=v21.monitor_worker(self.store,self.messages.append,MON)
+        self.assertEqual(result["confirmed_flip"],1,result)
+        self.assertEqual(result["weakness"],0,result)
+        self.assertIn("CONFIRMED FLIP",self.messages[0])
+        self.assertEqual(result["delivery_states"],["sent"])
+
+    def test_confirmed_flip_gets_per_scan_priority_over_weakness(self):
+        cutoff=datetime(2026,11,23,15,0,tzinfo=timezone.utc)
+        prefix="v21-direction:"+DAY+":"
+        with self.store.transaction() as tx:
+            # All six come from a verified delivered Telegram event.
+            tx.put("early-schedule-shadow:"+DAY+":MOMENTUM_0733",
+                dict(observed_at="2026-11-23T14:33:27+00:00",
+                     live_candidates=[dict(ticker=s,side="BULLISH",price=100)
+                                      for s in ("AAA","BBB","CCC","DDD","EEE","ZZZ")]))
+            event="early-direction-live:"+DAY+":MOMENTUM_0733"
+            tx.enqueue(event,dict(text="sent early"))
+            tx.execute("UPDATE mf_outbox SET status='sent' WHERE id=?",(event,))
+            state={}
+            for ticker in ("AAA","BBB","CCC","DDD","EEE","ZZZ"):
+                state[ticker]=dict(side="BULLISH",source="MOMENTUM_0733",
+                    at="2026-11-23T14:33:27+00:00",warned=False,flipped=False,
+                    opposite_streak=1 if ticker=="ZZZ" else 0,
+                    last_bar=(cutoff-timedelta(minutes=5)).isoformat()
+                             if ticker=="ZZZ" else None)
+            tx.put(prefix+"monitor:state",state)
+            data=snap(MON,cutoff)
+            data["rows"]=[dict(data["rows"][0],ticker=t) for t in state]
+            tx.put("intraday-v3:"+DAY+":latest",data)
+        result=v21.monitor_worker(self.store,self.messages.append,MON)
+        self.assertEqual(result["warnings"],4,result)
+        self.assertEqual(result["confirmed_flip"],1,result)
+        self.assertEqual(result["weakness"],3,result)
+        self.assertEqual(result["suppressed"]["scan_limit"],2)
+        self.assertIn("ZZZ",self.messages[0])
+        with self.store.transaction() as tx:
+            saved=tx.get(prefix+"monitor:notices")[0]["items"]
+        self.assertEqual(saved[0]["ticker"],"ZZZ")
+
     def test_five_min_strong_low_scans_even_hour_boundary(self):
         prefix="intraday-v3:"+DAY+":"
         current=dict(ticker="ABC",direction="BULLISH",score=78,price=101.0,eligible=True,
