@@ -213,7 +213,8 @@ class Integrated(unittest.TestCase):
         session = dict(date=DAY, open="09:30", close="16:00")
         with patch.object(scanner, "calendar", return_value=(session, None)), \
              patch.object(scanner, "pre_config", return_value={"symbols": ["SPY","ABC"]}), \
-             patch.object(scanner, "gather", return_value=dataset):
+             patch.object(scanner, "gather", return_value=dataset), \
+             patch.object(scanner, "tracked_symbols", side_effect=lambda base:base):
             report = scanner.worker(self.store, self.messages.append, scan_at)
         self.assertEqual(report["status"], "scanned")
         self.assertFalse(report["telegram_queued"])
