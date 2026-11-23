@@ -21,7 +21,7 @@ SYMBOLS = ("SPY","QQQ","IWM","GLD","XLF","AAPL","AMD","AMZN","AVGO",
 
 def slot(now):
     local = now.astimezone(DENVER)
-    t = local.time().replace(tzinfo=None)
+    t = local.replace(second=0,microsecond=0).time().replace(tzinfo=None)
     if local.weekday() >= 5 or not time(5,30) <= t <= time(7,25):
         return None
     if local.minute % 5 != 0:
