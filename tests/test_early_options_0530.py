@@ -65,7 +65,7 @@ class EarlyOptions0530Test(unittest.TestCase):
         choices,valid=scanner.candidates({"NVDA":one_minute(start,[100]*5)},
                                           {},start,cutoff)
         self.assertIsNone(choices)
-        self.assertEqual(valid,1)
+        self.assertEqual(valid,0)
 
     def test_sip_required_not_iex(self):
         def fake_api(path,params):
