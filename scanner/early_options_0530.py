@@ -11,12 +11,8 @@ from .intraday_v3 import evaluate, select, change
 from .store import drain
 
 PREFIX = "early-options-0530:"
-# Finalized Cboe GTH underlying list, Oct 19 2026; not a Robinhood
-# account-specific eligibility list. Never assert option liquidity.
-SYMBOLS = ("SPY","QQQ","IWM","GLD","XLF","AAPL","AMD","AMZN","AVGO",
-           "BABA","BAC","F","GOOG","GOOGL","HOOD","INTC","META",
-           "MRVL","MSFT","MU","NFLX","NOK","NVDA","ORCL","PFE",
-           "PLTR","SNDK","SPCX","TSLA","TSM")
+# Shared with the regular-session universe to avoid dropping 05:30 names.
+from .early_underlyings import SYMBOLS
 
 
 def slot(now):
