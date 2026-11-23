@@ -674,6 +674,10 @@ install_day_v34_shadow(app,storage,send_telegram)
 from scanner.early_schedule_shadow import install as install_early_schedule_shadow
 install_early_schedule_shadow(app,storage,send_telegram)
 
+# Independent 05:30-07:25 MT extended-options underlying watch (no orders).
+from scanner.early_options_0530 import install as install_early_options_0530
+install_early_options_0530(app,storage,send_telegram)
+
 # V2.1: 07:40 sent-only premarket recheck + independently monitored Flip WATCH.
 # 5m scanner and existing Pine/MC/SCMP/X/SX/HX are not modified by this module.
 from scanner.v21_direction import install as install_v21_direction

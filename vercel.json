@@ -43,6 +43,10 @@
     {
       "path": "/scanner/v21/monitor-worker",
       "schedule": "4-59/5 13-20 * * 1-5"
+    },
+    {
+      "path": "/scanner/early-options-0530/worker",
+      "schedule": "*/5 11-14 * * 1-5"
     }
   ]
 }
