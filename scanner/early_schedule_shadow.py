@@ -14,6 +14,7 @@ from .free_iex import DENVER,calendar,bounds,utc
 from .preopen.core import config,validate,stamp
 from .preopen.runtime import fetch
 from .intraday_early_watch import opening_candidate
+from .early_underlyings import tracked_symbols
 from .store import drain
 
 DAY="2026-11-16"  # historical V3.4 report and regression fixture
@@ -254,7 +255,7 @@ def worker(store,now,send=None):
     minutes,frame,cutoff_min=TARGETS[step]
     cutoff=opened+timedelta(minutes=cutoff_min)
     if now<cutoff:return dict(status="not_yet_complete",stage=step)
-    symbols=list(dict.fromkeys(list(config()["symbols"])+["SPY"]))
+    symbols=tracked_symbols(config()["symbols"])
     try:
         fetched=fetch_universe(symbols,frame,opened,cutoff)
         result=compute(step,fetched,opened,cutoff)
