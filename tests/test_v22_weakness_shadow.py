@@ -151,6 +151,8 @@ class Integration(unittest.TestCase):
         with self.store.transaction() as tx:
             record=tx.get("early-options-0530:"+DAY+":rth_handoff")
         self.assertEqual(record["premarket_symbols"],["NVDA"])
+        self.assertEqual(record["tracked_universe"],list(pre.SYMBOLS))
+        self.assertEqual(len(record["tracked_universe"]),30)
         self.assertEqual(record["next_early_watch"].split()[0],"07:33")
         self.assertEqual(record["orders"],0)
 
