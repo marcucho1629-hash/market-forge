@@ -342,7 +342,9 @@ def worker(store,send,now):
         all_bars=gather(symbols,opened,end)
         spy=validate(all_bars.get("SPY",[]),5,opened,end)
         spy_move=change([r["c"] for r in spy]) if len(spy)>=7 else None
-        rows=[evaluate(sym,all_bars[sym],opened,end,spy_move) for sym in symbols]
+        # A missing IEX symbol must fail closed *for that symbol*, not abort the
+        # full 5-minute scan of the remaining 151 underlyings.
+        rows=[evaluate(sym,all_bars.get(sym,[]),opened,end,spy_move) for sym in symbols]
         strong_policy=day>=STRONG_START_DATE
         selected=select(rows,strong=strong_policy)
         with store.transaction() as tx:
