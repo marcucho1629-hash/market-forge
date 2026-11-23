@@ -15,7 +15,8 @@ START = "2026-11-23"
 STAGES = ("MOMENTUM_0733", "POSSIBLE_FLIP_0735", "CONFIRM_0740", "EARLY_150_0745")
 SIDES = {"BULLISH", "BEARISH"}
 QUALIFIED_0740 = {"EARLY_MOMENTUM_WATCH", "EARLY_FLIP_WATCH"}
-MAX_DAILY = 20
+MAX_WEAKNESS_DAILY = 12   # Noncritical one-bar warnings cannot exhaust Flip capacity.
+MAX_CONFIRMED_FLIP_DAILY = 40  # Independent of WEAKNESS; each sent ticker flips at most once.
 MAX_SCAN = 4
 
 
@@ -228,23 +229,50 @@ def monitor_worker(store, send, now):
                     warned=False, flipped=False, opposite_streak=0)
         rows = {p["ticker"]: p for p in snap.get("rows", []) if p.get("ticker")}
         notices = tx.get(prefix + "monitor:notices", [])
-        used = sum(len(record["items"]) for record in notices)
-        budget = max(0, MAX_DAILY - used)
-        outgoing = []
+        # Separate daily budgets: a flood of early WEAKNESS must never
+        # suppress later CONFIRMED FLIP notices.  Logged counts are by
+        # candidate, not by Telegram message.
+        used_weak = sum(sum(item["kind"] == "WEAKNESS" for item in record["items"])
+                        for record in notices)
+        used_flip = sum(sum(item["kind"] == "CONFIRMED_FLIP" for item in record["items"])
+                        for record in notices)
+        budgets = {"WEAKNESS": max(0, MAX_WEAKNESS_DAILY - used_weak),
+                   "CONFIRMED_FLIP": max(0, MAX_CONFIRMED_FLIP_DAILY - used_flip)}
+        proposals = []
         for ticker in sorted(state):
             entry, kind = step_direction(state[ticker], rows.get(ticker), cutoff)
-            if kind and len(outgoing) < min(budget, MAX_SCAN):
+            if kind:
                 row = rows.get(ticker, {})
-                outgoing.append(dict(ticker=ticker, kind=kind,
+                proposals.append(dict(ticker=ticker, kind=kind,
                     original=entry["side"], current=row["direction"],
                     price=row.get("price")))
-                entry["warned"] = True
-                if kind == "CONFIRMED_FLIP":
-                    entry["flipped"] = True
             state[ticker] = entry
+        # High-severity confirmed reversals have first claim on the per-scan
+        # throughput, even if the ticker sorts after many one-bar weaknesses.
+        proposals.sort(key=lambda event:(event["kind"] != "CONFIRMED_FLIP", event["ticker"]))
+        outgoing = []
+        rejected = {"weakness_budget": 0, "flip_budget": 0, "scan_limit": 0}
+        for event in proposals:
+            kind = event["kind"]
+            if budgets[kind] <= 0:
+                rejected["flip_budget" if kind == "CONFIRMED_FLIP" else "weakness_budget"] += 1
+                continue
+            if len(outgoing) >= MAX_SCAN:
+                rejected["scan_limit"] += 1
+                continue
+            budgets[kind] -= 1
+            outgoing.append(event)
+            entry = state[event["ticker"]]
+            entry["warned"] = True
+            if kind == "CONFIRMED_FLIP":
+                entry["flipped"] = True
+            state[event["ticker"]] = entry
         tx.put(prefix + "monitor:state", state)
         tx.put(prefix + "monitor:bucket:" + bucket,
-               dict(at=now.isoformat(), tracked=len(state), warnings=len(outgoing)))
+               dict(at=now.isoformat(), tracked=len(state), warnings=len(outgoing),
+                    weakness_sent=sum(e["kind"] == "WEAKNESS" for e in outgoing),
+                    flips_sent=sum(e["kind"] == "CONFIRMED_FLIP" for e in outgoing),
+                    suppressed=rejected, budgets_remaining=budgets))
         if outgoing:
             key = prefix + "monitor:msg:" + bucket
             tx.enqueue(key, dict(text=flip_text(now, cutoff, outgoing),
@@ -254,6 +282,9 @@ def monitor_worker(store, send, now):
             tx.put(prefix + "monitor:notices", notices)
     delivery = drain(store, send, prefix=prefix + "monitor:msg:", now=now, limit=1) if outgoing else []
     return dict(status="monitored", tracked=len(state), warnings=len(outgoing),
+                weakness=sum(e["kind"] == "WEAKNESS" for e in outgoing),
+                confirmed_flip=sum(e["kind"] == "CONFIRMED_FLIP" for e in outgoing),
+                suppressed=rejected, budgets_remaining=budgets,
                 delivery_states=[x.get("status") for x in delivery])
 
 
