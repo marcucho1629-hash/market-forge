@@ -14,6 +14,7 @@ from .free_iex import DENVER,calendar,bounds,utc
 from .preopen.core import config,validate,stamp
 from .preopen.runtime import fetch
 from .intraday_early_watch import opening_candidate
+from .early_underlyings import tracked_symbols
 from .store import drain
 
 DAY="2026-11-16"  # historical V3.4 report and regression fixture
@@ -202,6 +203,15 @@ def direction_candidates(stage,rows,previous):
         return picks
     return pool[:LIVE_PER_STAGE[stage]]
 
+def extended_advisory(candidate):
+    """Advisory only: directional move from RTH open, not a CHASE entry veto."""
+    change=candidate.get("session_pct",candidate.get("session_move_pct"))
+    if not isinstance(change,(int,float)):
+        return False
+    return (candidate.get("side")=="BULLISH" and change>=1.2 or
+            candidate.get("side")=="BEARISH" and change<=-1.2)
+
+
 def direction_message(stage,picks,observed_at,cutoff):
     observed=observed_at.astimezone(DENVER)
     candle=cutoff.astimezone(DENVER)
@@ -214,8 +224,9 @@ def direction_message(stage,picks,observed_at,cutoff):
     for r in picks:
         sign="🟢" if r["side"]=="BULLISH" else "🔴"
         rel=r.get("spy_relative_pct",r.get("relative_spy_pct",0))
+        warning=" · ⚠ EXTENDED WATCH (MOVE ≥1.2%)" if extended_advisory(r) else ""
         lines.append(f'{sign} {r["ticker"]} {r["side"]} · ${r["price"]:.2f} '
-                     f'· RS {rel:+.2f}% · IEX ${r.get("iex_notional",0)/1000:.0f}K')
+                     f'· RS {rel:+.2f}% · IEX ${r.get("iex_notional",0)/1000:.0f}K'+warning)
     lines.append("확정 방향/수익 보장 아님 · 5·15·30분 후 결과 비교 예정")
     msg="\n".join(lines)
     if len(msg)>3900:raise ValueError("direction_message_too_long")
@@ -244,7 +255,7 @@ def worker(store,now,send=None):
     minutes,frame,cutoff_min=TARGETS[step]
     cutoff=opened+timedelta(minutes=cutoff_min)
     if now<cutoff:return dict(status="not_yet_complete",stage=step)
-    symbols=list(dict.fromkeys(list(config()["symbols"])+["SPY"]))
+    symbols=tracked_symbols(config()["symbols"])
     try:
         fetched=fetch_universe(symbols,frame,opened,cutoff)
         result=compute(step,fetched,opened,cutoff)
@@ -284,7 +295,10 @@ def worker(store,now,send=None):
                     tx.enqueue(alert_id,dict(text=msg,expires_at=(observed_at+
                                               timedelta(minutes=3)).isoformat()))
                     live_picks=[dict(ticker=p["ticker"],side=p["side"],
-                                     price=p["price"],state=p["state"])
+                                     price=p["price"],state=p["state"],
+                                     extended_warning=extended_advisory(p),
+                                     session_pct=p.get("session_pct",p.get("session_move_pct")),
+                                     chase=p.get("chase","UNKNOWN"))
                                 for p in picks]
                     for p in picks:
                         prev[p["ticker"]]=dict(side=p["side"],stage=step,

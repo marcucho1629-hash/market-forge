@@ -126,7 +126,7 @@ class Worker(unittest.TestCase):
     def test_hourly_send_once_against_preopen_and_persist(self):
         universe=["SPY","NVDA","HIMS"]
         dataset=dict(SPY=bars(1),NVDA=bars(1),HIMS=bars(-1))
-        with patch.object(v,"calendar",return_value=(TODAY,None)),patch.object(v,"pre_config",return_value={"symbols":universe}),patch.object(v,"gather",return_value=dataset):
+        with patch.object(v,"calendar",return_value=(TODAY,None)),patch.object(v,"pre_config",return_value={"symbols":universe}),patch.object(v,"gather",return_value=dataset),patch.object(v,"tracked_symbols",side_effect=lambda base:base):
             result=v.worker(self.store,self.sent.append,NOW)
             self.assertEqual(result["status"],"scanned")
             self.assertTrue(result["telegram_queued"])
@@ -154,7 +154,8 @@ class Worker(unittest.TestCase):
         dataset=dict(SPY=shift(bars(1)),NVDA=shift(bars(1)),HIMS=shift(bars(-1)))
         with patch.object(v,"calendar",return_value=(session,None)),patch.object(
                 v,"pre_config",return_value={"symbols":universe}),patch.object(
-                v,"gather",return_value=dataset):
+                v,"gather",return_value=dataset),patch.object(
+                v,"tracked_symbols",side_effect=lambda base:base):
             first=v.worker(self.store,self.sent.append,next_now)
             self.assertEqual(first["status"],"scanned")
             self.assertTrue(first["telegram_queued"])

@@ -682,3 +682,7 @@ install_early_options_0530(app,storage,send_telegram)
 # 5m scanner and existing Pine/MC/SCMP/X/SX/HX are not modified by this module.
 from scanner.v21_direction import install as install_v21_direction
 install_v21_direction(app,storage,send_telegram)
+
+# V2.2: sent-only, research-only 3x1-minute weakening shadow. No Telegram.
+from scanner.v22_weakness_shadow import install as install_v22_weakness_shadow
+install_v22_weakness_shadow(app,storage)

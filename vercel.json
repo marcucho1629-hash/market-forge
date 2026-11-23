@@ -47,6 +47,10 @@
     {
       "path": "/scanner/early-options-0530/worker",
       "schedule": "*/5 11-14 * * 1-5"
+    },
+    {
+      "path": "/scanner/v22/weakness-3m-shadow/worker",
+      "schedule": "*/3 13-20 * * 1-5"
     }
   ]
 }

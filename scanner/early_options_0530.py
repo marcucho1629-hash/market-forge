@@ -4,19 +4,15 @@ import os
 from datetime import timedelta, time
 
 from fastapi import HTTPException, Request
-from .free_iex import DENVER, calendar, utc, api, DataError
+from .free_iex import DENVER, calendar, bounds, utc, api, DataError
 from .preopen.core import validate, stamp
 from .early_schedule_shadow import first_three_1m, flip_five_1m
 from .intraday_v3 import evaluate, select, change
 from .store import drain
 
 PREFIX = "early-options-0530:"
-# Finalized Cboe GTH underlying list, Oct 19 2026; not a Robinhood
-# account-specific eligibility list. Never assert option liquidity.
-SYMBOLS = ("SPY","QQQ","IWM","GLD","XLF","AAPL","AMD","AMZN","AVGO",
-           "BABA","BAC","F","GOOG","GOOGL","HOOD","INTC","META",
-           "MRVL","MSFT","MU","NFLX","NOK","NVDA","ORCL","PFE",
-           "PLTR","SNDK","SPCX","TSLA","TSM")
+# Shared with the regular-session universe to avoid dropping 05:30 names.
+from .early_underlyings import SYMBOLS
 
 
 def slot(now):
@@ -103,7 +99,47 @@ def candidates(one,five,opened,cutoff):
     return picks[:5],len(last5)
 
 
+def regular_open_handoff(store,now):
+    """Record a clean 07:30 MT boundary; do not reuse premkt as RTH bars."""
+    local=now.astimezone(DENVER)
+    if local.weekday()>=5 or local.hour!=7 or local.minute!=30:
+        return None
+    market,_=calendar(now)
+    if not market or market.get("date")!=local.date().isoformat():
+        return {"status":"market_closed","orders":0}
+    opened,_=bounds(market)
+    if not opened<=now<opened+timedelta(minutes=1):
+        return {"status":"not_regular_open","orders":0}
+    key=PREFIX+market["date"]+":rth_handoff"
+    with store.transaction() as tx:
+        record=tx.get(key)
+        if record is None:
+            previous=tx.get(PREFIX+market["date"]+":latest")
+            cutoff=previous.get("cutoff") if previous else None
+            fresh=False
+            if cutoff:
+                from datetime import datetime
+                elapsed=(opened-datetime.fromisoformat(cutoff)).total_seconds()
+                fresh=0<=elapsed<=15*60
+            record=dict(status="REGULAR_SESSION_OPEN",
+                        opened_at=opened.isoformat(),observed_at=now.isoformat(),
+                        premarket_feed="SIP_STOCK" if fresh else "MISSING",
+                        premarket_cutoff=cutoff if fresh else None,
+                        tracked_universe=list(SYMBOLS),
+                        premarket_symbols=[p["ticker"] for p in previous.get("selected",[])]
+                                         if fresh else [],
+                        next_early_watch="07:33 MT IEX first 3 completed RTH minutes",
+                        options_quotes="UNVERIFIED",robinhood_eligibility="UNVERIFIED",
+                        research_only=True,orders=0)
+            tx.put(key,record)
+    return {"status":"regular_open_handoff",
+            "premarket":record["premarket_feed"],"next_early":"07:33_MT",
+            "orders":0}
+
+
 def worker(store,send,now):
+    handoff=regular_open_handoff(store,now)
+    if handoff is not None:return handoff
     period=slot(now)
     if not period: return {"status":"outside_schedule"}
     day,opened,cutoff=period
