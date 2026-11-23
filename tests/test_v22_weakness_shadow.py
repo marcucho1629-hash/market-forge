@@ -38,7 +38,7 @@ class Pure(unittest.TestCase):
         self.assertEqual(v22.slot(at(7,51)),at(7,51,0))
         self.assertEqual(v22.slot(at(13,57)),at(13,57,0))
         self.assertIsNone(v22.slot(at(14,0)))
-        summer=datetime(2026,7,7,7,48,13,tzinfo=MT).astimezone(timezone.utc)
+        summer=datetime(2027,7,7,7,48,13,tzinfo=MT).astimezone(timezone.utc)
         self.assertEqual(v22.slot(summer),summer.replace(second=0))
         prior=datetime(2026,11,23,8,0,tzinfo=MT).astimezone(timezone.utc)
         self.assertIsNone(v22.slot(prior))
