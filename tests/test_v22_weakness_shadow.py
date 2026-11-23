@@ -43,6 +43,22 @@ class Pure(unittest.TestCase):
         prior=datetime(2026,11,23,8,0,tzinfo=MT).astimezone(timezone.utc)
         self.assertIsNone(v22.slot(prior))
 
+    def test_0530_underlyings_stay_in_0733_and_through_rth(self):
+        from scanner.early_underlyings import SYMBOLS, tracked_symbols
+        from scanner import intraday_v3
+        from scanner import early_schedule_shadow
+        self.assertEqual(len(SYMBOLS),30)
+        self.assertEqual(len(set(SYMBOLS)),30)
+        base=["SPY","QQQ","NVDA","ABC"]
+        union=tracked_symbols(base)
+        self.assertEqual(union[:4],base)
+        self.assertTrue(set(SYMBOLS).issubset(set(union)))
+        self.assertIn("NOK",union)
+        self.assertIn("SPCX",union)
+        self.assertIs(intraday_v3.tracked_symbols,tracked_symbols)
+        self.assertIs(early_schedule_shadow.tracked_symbols,tracked_symbols)
+        self.assertEqual(pre.SYMBOLS,SYMBOLS)
+
     def test_3min_opposite_weakness_needs_all_three_bars_and_vwap(self):
         start=at(8,3,0)
         raw=minutes(start,[(100,99.9),(99.9,99.5),(99.5,99.1)])
