@@ -12,6 +12,7 @@ from .preopen.core import config as pre_config,validate
 from .preopen.runtime import fetch
 from .store import drain
 from .intraday_early_watch import opening_worker,live_low_alert
+from .early_underlyings import tracked_symbols
 from .opening_radar_0735 import worker as opening_radar_worker
 from .day_v32_shadow import capture as capture_v32, DAY as V32_DAY
 from .day_v33_early_flip_shadow import capture as capture_v33, DAY as V33_DAY
@@ -272,7 +273,7 @@ def worker(store,send,now):
         end=end.replace(second=0,microsecond=0)-timedelta(minutes=end.minute%5)
         if today["date"]>=STRONG_START_DATE and end<=opened+timedelta(minutes=10):
             args=(store,send,now,opened,end,today["date"],
-                  PREFIX+today["date"]+":",pre_config()["symbols"],gather)
+                  PREFIX+today["date"]+":",tracked_symbols(pre_config()["symbols"]),gather)
             if today["date"]==V34_DAY:
                 result=opening_radar_worker(*args,observer=lambda raw:
                     shadow_capture_v34_safe(store,today["date"],now,end,
@@ -300,7 +301,7 @@ def worker(store,send,now):
         if end<opened+timedelta(minutes=15):
             return dict(status="early_open_waiting")
         args=(store,send,now,opened,end,today["date"],
-              PREFIX+today["date"]+":",pre_config()["symbols"],gather)
+              PREFIX+today["date"]+":",tracked_symbols(pre_config()["symbols"]),gather)
         if today["date"]==V34_DAY:
             result=opening_worker(*args,observer=lambda raw:
                 shadow_capture_v34_safe(store,today["date"],now,end,
@@ -337,7 +338,7 @@ def worker(store,send,now):
         if prior and (now-datetime.fromisoformat(prior["at"])).total_seconds()<120:return dict(status="busy")
         tx.put(prefix+"lease",dict(token=token,at=now.isoformat()))
     try:
-        symbols=pre_config()["symbols"]
+        symbols=tracked_symbols(pre_config()["symbols"])
         all_bars=gather(symbols,opened,end)
         spy=validate(all_bars.get("SPY",[]),5,opened,end)
         spy_move=change([r["c"] for r in spy]) if len(spy)>=7 else None
