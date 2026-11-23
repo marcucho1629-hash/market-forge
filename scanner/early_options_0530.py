@@ -125,6 +125,7 @@ def regular_open_handoff(store,now):
                         opened_at=opened.isoformat(),observed_at=now.isoformat(),
                         premarket_feed="SIP_STOCK" if fresh else "MISSING",
                         premarket_cutoff=cutoff if fresh else None,
+                        tracked_universe=list(SYMBOLS),
                         premarket_symbols=[p["ticker"] for p in previous.get("selected",[])]
                                          if fresh else [],
                         next_early_watch="07:33 MT IEX first 3 completed RTH minutes",
