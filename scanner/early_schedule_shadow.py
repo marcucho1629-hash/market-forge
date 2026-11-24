@@ -377,6 +377,71 @@ def phase_summary(store,five_history,day=DAY):
                          "No synthetic 1m/5m bars; incomplete data means missing stage.",
                          "Initial 3m and 5m flip hypotheses are not confirmed trades."])
 
+
+def extra_momentum(store, now, send=None):
+    """Independent rolling three-minute WATCH; never changes original stage budget."""
+    local=now.astimezone(DENVER)
+    if local.weekday()>=5 or local.hour!=7 or local.minute not in (25,26,40,41):
+        return None
+    day=local.date().isoformat()
+    pre=local.minute in (25,26)
+    minute=25 if pre else 40
+    stage="MOMENTUM_0725" if pre else "MOMENTUM_0740"
+    cutoff=local.replace(minute=minute,second=0,microsecond=0)
+    start=cutoff-timedelta(minutes=3)
+    key=prefix_for(day)+stage
+    with store.transaction() as tx:
+        if tx.get(key):return dict(status="already_captured",stage=stage)
+    today,_=calendar(now)
+    if not today or today["date"]!=day:return dict(status="market_closed",stage=stage)
+    opened,closed=bounds(today)
+    if (pre and cutoff>=opened) or (not pre and (start<opened or cutoff>closed)):
+        return dict(status="outside_session",stage=stage)
+    try:
+        if pre:
+            from .early_options_0530 import SYMBOLS,sip_bars
+            symbols=list(SYMBOLS)
+            market=sip_bars(symbols,"1Min",start,cutoff)
+        else:
+            symbols=tracked_symbols(config()["symbols"])
+            market=fetch_universe(symbols,"1Min",start,cutoff)
+        complete={s:b for s,raw in market.items()
+                  if (b:=_complete(raw,1,start,cutoff)) is not None}
+        minimum=max(2,(len(symbols)+2)//3) if pre else MIN_UNIVERSE_VALID
+        if "SPY" not in complete or len(complete)<minimum:
+            return dict(status="insufficient_complete_bars",stage=stage,valid_symbols=len(complete))
+        rows=first_three_1m(complete)
+    except Exception:
+        return dict(status="data_provider_or_research_error",stage=stage)
+    observed=utc()
+    picks=[]
+    with store.transaction() as tx:
+        if tx.get(key):return dict(status="already_captured",stage=stage)
+        previous=tx.get(LIVE_PREFIX+day+":sent",{})
+        if pre:
+            previous={s:dict(side=v) for s,v in tx.get("early-options-0530:"+day+":notified",{}).items()}
+        else:
+            previous=dict(previous)
+        if send is not None and 0<=(observed-cutoff).total_seconds()<=180:
+            picks=direction_candidates("MOMENTUM_0733",rows,previous)
+            if picks:
+                msg=direction_message("MOMENTUM_0733",picks,observed,cutoff)
+                msg=msg.replace("EARLY MOMENTUM ·",("PREMARKET SIP" if pre else "RTH IEX")+" EARLY MOMENTUM ·",1)
+                if pre:msg=msg.replace("IEX $","SIP $")
+                tx.enqueue(key+":msg",dict(text=msg,expires_at=(observed+timedelta(minutes=3)).isoformat()))
+        tx.put(key,dict(stage=stage,day=day,cutoff=cutoff.isoformat(),observed_at=observed.isoformat(),
+                        input_frame="1Min",valid_symbols=len(complete),feed="SIP" if pre else "IEX",
+                        states=dict(Counter(r["state"] for r in rows)),rows=rows,
+                        live_candidates=picks,telegram_sent=False,orders=0))
+    delivery=drain(store,send,prefix=key+":msg",now=observed,limit=1) if picks else []
+    with store.transaction() as tx:
+        record=tx.get(key)
+        record["live_delivery"]=delivery
+        record["telegram_sent"]=any(x.get("status")=="sent" for x in delivery)
+        tx.put(key,record)
+    return dict(status="recorded",stage=stage,valid_symbols=len(complete),live_candidates=picks,
+                live_delivery=delivery,orders=0)
+
 def install(app,storage,send=None):
     @app.get("/scanner/early-schedule-shadow/worker")
     def cron(request:Request):
@@ -384,7 +449,11 @@ def install(app,storage,send=None):
         if not secret or not hmac.compare_digest(
                 request.headers.get("authorization",""),"Bearer "+secret):
             raise HTTPException(401,"Unauthorized")
-        result=worker(storage(),utc(),send=send)
+        now=utc()
+        store=storage()
+        result=worker(store,now,send=send)
+        extra=extra_momentum(store,now,send=send)
+        if extra is not None:result["extra_momentum"]=extra
         # Never log webhook secrets, full ticker-level rows, or raw API payloads.
         print("EARLY_SCHEDULE_SHADOW "+json.dumps(result,sort_keys=True),flush=True)
         return result
